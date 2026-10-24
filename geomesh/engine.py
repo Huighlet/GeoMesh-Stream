@@ -120,3 +120,18 @@ class GeoMeshEngine:
         """Calculate Closest Point of Approach (CPA) and Time to CPA (TCPA) between two vessels."""
         with self._lock:
             return self.kinematics.calculate_cpa_tcpa(entity_id_1, entity_id_2)
+
+    def remove_entity(self, entity_id: str) -> bool:
+        """Remove a tracked asset from the spatial index and kinematic history."""
+        with self._lock:
+            self._entity_positions.pop(entity_id, None)
+            self.kinematics._states.pop(entity_id, None)
+            return self.entity_index.remove(entity_id)
+
+    def clear_entities(self) -> int:
+        """Clear all moving entities from spatial mesh."""
+        with self._lock:
+            count = len(self._entity_positions)
+            for ent_id in list(self._entity_positions.keys()):
+                self.remove_entity(ent_id)
+            return count

@@ -2,7 +2,7 @@
 
 **Real-Time Ghana Maritime Vessel Stream, Collision Avoidance & Coastal Geofence Engine**
 
-[![Build Status](https://img.shields.io/badge/tests-31%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
+[![Build Status](https://img.shields.io/badge/tests-39%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Zero AI Slop](https://img.shields.io/badge/codebase-zero%20ai%20slop-black.svg)](https://github.com/Huighlet/GeoMesh-Stream)
@@ -20,7 +20,9 @@ Coastal maritime environments in the **Gulf of Guinea** present an acute dual-cl
 4. **Closest Point of Approach (CPA & TCPA):** Computes relative kinematic vectors to detect collision trajectories when industrial tankers converge within 1.0 Nautical Mile of artisanal canoes.
 5. **Mother-Tongue IVR Robocalls:** Automatically triggers instant audible phone calls in the fisherman's native dialect (Ewe/Ga/Fante) when CPA risk thresholds are breached.
 6. **Ghana Inshore Exclusion Zone (IEZ) Enforcement:** Mathematically evaluates vessel boundaries against the 6-Nautical-Mile artisanal reserve codified under the **Ghana Fisheries Act (Act 625)** to detect illegal industrial trawler incursions.
-7. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Uses great-circle kinematics and prevailing eastward ocean current vectors ($\approx 1.4\text{ kt}$) to project search-and-rescue drift cones when artisanal phone signals drop offline.
+7. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Models physical ocean currents ($\approx 1.4\text{ kt}$ Eastward) and wind leeway to calculate search datums and generate formal SAR Incident Dockets for the Ghana Maritime Authority (GMA) and Ghana Navy Eastern Naval Command (Tema).
+8. **Direct NMEA 0183 AIS Radio Decoder:** Zero-dependency bit-level parser for raw VHF `!AIVDM` sentences from coastal AIS stations (Types 1, 2, 3 position reports and Type 5 static voyage data).
+9. **Durable SQLite WAL Storage & Carrier Webhook Gateway:** Zero-loss persistence for subscribers, voyages, and SAR dockets, paired with HMAC-SHA256 authenticated webhook ingestion for MTN Ghana, Telecel, and Hubtel.
 
 ---
 
@@ -144,8 +146,11 @@ GeoMesh-Stream/
 │   ├── geofence.py           # Radial & Polygon Geofences and State Machine
 │   ├── kinematics.py         # Kinematic state estimator and CPA/TCPA math
 │   ├── engine.py             # Unified streaming geospatial coordinator
-│   ├── telecom.py            # Zero-touch passive GSM LBS, TA derivation & IVR voice alerts
-│   ├── server.py             # Fast REST API, Prometheus metrics & Leaflet radar dashboard
+│   ├── storage.py            # Durable SQLite WAL persistence (subscribers, voyages, SAR)
+│   ├── ais.py                # Zero-dependency bit-level NMEA 0183 !AIVDM radio decoder
+│   ├── sar.py                # Guinea Current drift model & Ghana Navy SAR watchdog
+│   ├── telecom.py            # Zero-touch GSM LBS, Timing Advance, HMAC webhooks & IVR
+│   ├── server.py             # FastAPI REST engine, Prometheus metrics & Leaflet radar
 │   ├── client.py             # Idiomatic GeoMeshClient SDK
 │   └── cli.py                # Benchmark suite and CLI tool
 ├── examples/
@@ -158,6 +163,7 @@ GeoMesh-Stream/
 │   ├── test_engine.py        # Proximity queries and end-to-end ingestion
 │   ├── test_server.py        # REST endpoints and live Leaflet dashboard
 │   ├── test_telecom.py       # Zero-touch subscribers, Timing Advance & voice alerts
+│   ├── test_production.py    # SQLite WAL, AIS decoding, SAR drift & HMAC webhooks
 │   └── test_client_and_enterprise.py # RateLimiter, Prometheus, snapshots & CPA
 ├── pyproject.toml            # Build metadata and tool configuration
 ├── requirements.txt          # Development dependencies (pytest, uvicorn)
@@ -191,40 +197,48 @@ pytest -v
 ```
 Output:
 ```
-tests/test_client_and_enterprise.py::test_prometheus_metrics_endpoint PASSED [  3%]
-tests/test_client_and_enterprise.py::test_rate_limiter_headers PASSED    [  6%]
-tests/test_client_and_enterprise.py::test_geofences_export_manifest PASSED [  9%]
-tests/test_client_and_enterprise.py::test_fleet_state_snapshot PASSED    [ 12%]
-tests/test_client_and_enterprise.py::test_client_sdk_end_to_end PASSED   [ 16%]
-tests/test_client_and_enterprise.py::test_maritime_collision_risk_cpa PASSED [ 19%]
-tests/test_engine.py::test_engine_telemetry_and_alerts PASSED            [ 22%]
-tests/test_engine.py::test_engine_query_radius PASSED                    [ 25%]
-tests/test_geofence.py::test_radial_geofence_containment PASSED          [ 29%]
-tests/test_geofence.py::test_polygon_geofence_containment PASSED         [ 32%]
-tests/test_geofence.py::test_geofence_engine_transition_lifecycle PASSED [ 35%]
-tests/test_geofence.py::test_duplicate_geofence_registration PASSED      [ 38%]
-tests/test_index.py::test_spatial_grid_insert_and_query PASSED           [ 41%]
-tests/test_index.py::test_spatial_grid_remove PASSED                     [ 45%]
-tests/test_index.py::test_spatial_grid_radius_query PASSED               [ 48%]
-tests/test_kinematics.py::test_kinematic_velocity_and_bearing PASSED     [ 51%]
-tests/test_kinematics.py::test_dead_reckoning_prediction PASSED          [ 54%]
-tests/test_math.py::test_haversine_known_distances PASSED                [ 58%]
-tests/test_math.py::test_initial_bearing PASSED                          [ 61%]
-tests/test_math.py::test_dead_reckoning_destination PASSED               [ 64%]
-tests/test_math.py::test_point_in_polygon_convex PASSED                  [ 67%]
-tests/test_math.py::test_point_in_polygon_concave PASSED                 [ 70%]
-tests/test_server.py::test_health_endpoint PASSED                        [ 74%]
-tests/test_server.py::test_leaflet_dashboard_html PASSED                 [ 77%]
-tests/test_server.py::test_create_radial_and_polygon_geofence PASSED     [ 80%]
-tests/test_server.py::test_telemetry_ingestion_and_proximity PASSED      [ 83%]
-tests/test_telecom.py::test_one_time_subscriber_registration PASSED      [ 87%]
-tests/test_telecom.py::test_timing_advance_position_derivation PASSED    [ 90%]
-tests/test_telecom.py::test_passive_handover_zero_touch_lifecycle PASSED [ 93%]
-tests/test_telecom.py::test_multilingual_voice_alert_scripts PASSED      [ 96%]
+tests/test_client_and_enterprise.py::test_prometheus_metrics_endpoint PASSED [  2%]
+tests/test_client_and_enterprise.py::test_rate_limiter_headers PASSED    [  5%]
+tests/test_client_and_enterprise.py::test_geofences_export_manifest PASSED [  7%]
+tests/test_client_and_enterprise.py::test_fleet_state_snapshot PASSED    [ 10%]
+tests/test_client_and_enterprise.py::test_client_sdk_end_to_end PASSED   [ 12%]
+tests/test_client_and_enterprise.py::test_maritime_collision_risk_cpa PASSED [ 15%]
+tests/test_engine.py::test_engine_telemetry_and_alerts PASSED            [ 17%]
+tests/test_engine.py::test_engine_query_radius PASSED                    [ 20%]
+tests/test_geofence.py::test_radial_geofence_containment PASSED          [ 23%]
+tests/test_polygon_geofence_containment PASSED         [ 25%]
+tests/test_geofence.py::test_geofence_engine_transition_lifecycle PASSED [ 28%]
+tests/test_geofence.py::test_duplicate_geofence_registration PASSED      [ 30%]
+tests/test_index.py::test_spatial_grid_insert_and_query PASSED           [ 33%]
+tests/test_index.py::test_spatial_grid_remove PASSED                     [ 35%]
+tests/test_index.py::test_spatial_grid_radius_query PASSED               [ 38%]
+tests/test_kinematics.py::test_kinematic_velocity_and_bearing PASSED     [ 41%]
+tests/test_kinematics.py::test_dead_reckoning_prediction PASSED          [ 43%]
+tests/test_math.py::test_haversine_known_distances PASSED                [ 46%]
+tests/test_math.py::test_initial_bearing PASSED                          [ 48%]
+tests/test_math.py::test_dead_reckoning_destination PASSED               [ 51%]
+tests/test_math.py::test_point_in_polygon_convex PASSED                  [ 53%]
+tests/test_math.py::test_point_in_polygon_concave PASSED                 [ 56%]
+tests/test_production.py::test_durable_store_sqlite_crud PASSED          [ 58%]
+tests/test_production.py::test_ais_nmea_decoder PASSED                   [ 61%]
+tests/test_production.py::test_sar_guinea_current_drift_model PASSED     [ 64%]
+tests/test_production.py::test_sar_watchdog_incident_generation PASSED   [ 66%]
+tests/test_production.py::test_carrier_webhook_hmac_processing PASSED    [ 69%]
+tests/test_production.py::test_rest_ais_nmea_ingestion PASSED            [ 71%]
+tests/test_production.py::test_rest_sar_lifecycle_via_sdk PASSED         [ 74%]
+tests/test_production.py::test_weather_broadcast_endpoint PASSED         [ 76%]
+tests/test_server.py::test_health_endpoint PASSED                        [ 79%]
+tests/test_server.py::test_leaflet_dashboard_html PASSED                 [ 82%]
+tests/test_server.py::test_create_radial_and_polygon_geofence PASSED     [ 84%]
+tests/test_server.py::test_telemetry_ingestion_and_proximity PASSED      [ 87%]
+tests/test_telecom.py::test_one_time_subscriber_registration PASSED      [ 89%]
+tests/test_telecom.py::test_timing_advance_position_derivation PASSED    [ 92%]
+tests/test_telecom.py::test_passive_handover_zero_touch_lifecycle PASSED [ 94%]
+tests/test_telecom.py::test_multilingual_voice_alert_scripts PASSED      [ 97%]
 tests/test_telecom.py::test_telecom_rest_endpoints PASSED                [100%]
 
-======================== 31 passed in 1.89s ========================
-```
+======================== 39 passed in 2.89s ========================
+`
 
 ### Running Standalone Fleet Server & Leaflet.js Dashboard
 

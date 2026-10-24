@@ -1,11 +1,13 @@
 """
 GeoMesh Client SDK: Idiomatic high-performance client for the GeoMesh-Stream Spatial Engine.
-Supports high-throughput GPS telemetry streaming, dynamic geofence management, proximity querying,
-dead-reckoning position projection, and fleet forensic snapshots.
+Supports high-throughput GPS telemetry streaming, NMEA 0183 AIS radio ingestion,
+carrier webhooks, Search and Rescue (SAR) incident handling, and fleet forensic snapshots.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -153,3 +155,98 @@ class GeoMeshClient:
         resp = self._client.get("/metrics")
         resp.raise_for_status()
         return resp.text
+
+    # -------------------------------------------------------------------------
+    # Production Maritime & Telecom Extensions
+    # -------------------------------------------------------------------------
+
+    def register_subscriber(
+        self,
+        phone_number: str,
+        canoe_name: str,
+        landing_beach: str = "Keta Beach",
+        language: str = "EWE",
+    ) -> Dict[str, Any]:
+        """Enroll an artisanal fisherman into the zero-touch telecom safety registry."""
+        payload = {
+            "phone_number": phone_number,
+            "canoe_name": canoe_name,
+            "landing_beach": landing_beach,
+            "language": language,
+        }
+        resp = self._client.post("/v1/telecom/register", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_subscribers(self) -> Dict[str, Any]:
+        """List all registered artisanal fishermen and current voyage statuses."""
+        resp = self._client.get("/v1/telecom/subscribers")
+        resp.raise_for_status()
+        return resp.json()
+
+    def ingest_carrier_webhook(
+        self,
+        payload: Dict[str, Any],
+        secret: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send authenticated cell tower handover / location update from carrier."""
+        raw_body = json.dumps(payload).encode("utf-8")
+        headers = {}
+        if secret:
+            sig = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+            headers["X-Carrier-Signature"] = sig
+
+        resp = self._client.post("/v1/telecom/carrier-webhook", content=raw_body, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def ingest_ais_nmea(self, raw_nmea: str) -> Dict[str, Any]:
+        """Ingest raw NMEA 0183 !AIVDM radio sentence from coastal VHF receiver."""
+        resp = self._client.post("/v1/ais/nmea", json={"raw_nmea": raw_nmea})
+        resp.raise_for_status()
+        return resp.json()
+
+    def declare_sar_incident(
+        self,
+        phone_number: str,
+        reason: str = "OVERDUE_VOYAGE_MOTOR_FAILURE",
+        hours_adrift: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Declare emergency Search and Rescue operation with Guinea Current drift calculation."""
+        payload = {
+            "phone_number": phone_number,
+            "reason": reason,
+            "hours_adrift": hours_adrift,
+        }
+        resp = self._client.post("/v1/sar/declare", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_sar_incidents(self, active_only: bool = True) -> Dict[str, Any]:
+        """List active or historical Search and Rescue incidents."""
+        resp = self._client.get("/v1/sar/incidents", params={"active_only": active_only})
+        resp.raise_for_status()
+        return resp.json()
+
+    def resolve_sar_incident(self, incident_id: str) -> Dict[str, Any]:
+        """Resolve a Search and Rescue incident."""
+        resp = self._client.post(f"/v1/sar/resolve/{incident_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def dispatch_voice_alert(self, phone_number: str, cpa_nm: float, tcpa_min: float) -> Dict[str, Any]:
+        """Dispatch mother-tongue automated robocall alert."""
+        payload = {
+            "phone_number": phone_number,
+            "cpa_nm": cpa_nm,
+            "tcpa_min": tcpa_min,
+        }
+        resp = self._client.post("/v1/telecom/alert/voice", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def clear_fleet(self) -> Dict[str, Any]:
+        """Clear active vessels and radar markers."""
+        resp = self._client.post("/v1/fleet/clear")
+        resp.raise_for_status()
+        return resp.json()

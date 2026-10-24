@@ -1,10 +1,12 @@
 """
 GeoMesh-Stream: Standalone Fleet Telemetry & Spatial Geofence Server.
-Includes REST API endpoints and an embedded interactive Leaflet.js web dashboard.
+Includes REST API endpoints, NMEA 0183 AIS radio ingestion, Search and Rescue (SAR)
+Guinea Current drift extrapolation, and an embedded interactive Leaflet.js web dashboard.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -14,8 +16,11 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from geomesh.ais import AISDecoder, AISPositionReport, AISStaticReport
 from geomesh.engine import GeoMeshEngine
 from geomesh.geofence import PolygonGeofence, RadialGeofence
+from geomesh.sar import GuineaCurrentSARModel, SARWatchdog
+from geomesh.storage import DurableStore, SARIncidentRecord, SubscriberRecord
 from geomesh.telecom import (
     Language,
     MaritimeVoiceAlertService,
@@ -31,36 +36,41 @@ from geomesh.types import (
 )
 
 app = FastAPI(
-    title="GeoMesh-Stream Telemetry & Geofence Engine",
-    description="High-Throughput Streaming Geospatial Engine with Spatial Grid Indexing, Kinematics & Dead-Reckoning.",
+    title="GeoMesh-Stream Ghana Maritime Defense & Safety Engine",
+    description="Real-Time Ghana Maritime Vessel Stream, Zero-Touch Telecom LBS & SAR Engine.",
     version="1.0.0",
 )
 
-# Global engine instance & telecom gateway
+# Global engine instance, durable storage, and gateways
 _engine = GeoMeshEngine(cell_size_deg=0.02)
-telecom_gateway = TelecomPassiveGateway()
+durable_store = DurableStore()
+telecom_gateway = TelecomPassiveGateway(store=durable_store)
+sar_watchdog = SARWatchdog(durable_store)
+ais_decoder = AISDecoder()
+
 _telemetry_pings_total = 0
 _geofence_breaches_total = 0
 
-# Seed registered Ghanaian artisanal fishermen for demonstration
-telecom_gateway.register_subscriber(
-    phone_number="+233241234501",
-    canoe_name="Nyimdzii [Keta-01]",
-    landing_beach="Keta Beach",
-    language=Language.EWE,
-)
-telecom_gateway.register_subscriber(
-    phone_number="+233241234502",
-    canoe_name="Mawueyro [Keta-02]",
-    landing_beach="Dzelukope",
-    language=Language.EWE,
-)
-telecom_gateway.register_subscriber(
-    phone_number="+233241234503",
-    canoe_name="Oshu [Jamestown-01]",
-    landing_beach="Jamestown",
-    language=Language.GA,
-)
+# Seed initial registered Ghanaian artisanal fishermen if table is empty
+if len(telecom_gateway.list_subscribers()) == 0:
+    telecom_gateway.register_subscriber(
+        phone_number="+233241234501",
+        canoe_name="Nyimdzii [Keta-01]",
+        landing_beach="Keta Beach",
+        language=Language.EWE,
+    )
+    telecom_gateway.register_subscriber(
+        phone_number="+233241234502",
+        canoe_name="Mawueyro [Keta-02]",
+        landing_beach="Dzelukope",
+        language=Language.EWE,
+    )
+    telecom_gateway.register_subscriber(
+        phone_number="+233241234503",
+        canoe_name="Oshu [Jamestown-01]",
+        landing_beach="Jamestown",
+        language=Language.GA,
+    )
 
 
 class RateLimiter:
@@ -186,6 +196,43 @@ class TelemetryPingRequest(BaseModel):
     timestamp_ns: Optional[int] = Field(default=None, description="Nanosecond timestamp (defaults to now)")
 
 
+class RegisterSubscriberRequest(BaseModel):
+    phone_number: str = Field(..., description="Ghanaian mobile number (e.g. 0241234567)")
+    canoe_name: str = Field(..., description="Canoe name / registration (e.g. Nyimdzii)")
+    landing_beach: str = Field(default="Keta Beach", description="Landing beach")
+    language: str = Field(default="EWE", description="Primary mother tongue (EWE, GA, FANTE, ENGLISH)")
+
+
+class CellEventRequest(BaseModel):
+    phone_number: str = Field(..., description="Subscriber phone number")
+    tower_id: str = Field(..., description="Cell tower sector ID")
+    timing_advance: int = Field(default=0, ge=0, le=64, description="GSM Timing Advance (0..64, each step = 550m)")
+    timestamp_ns: Optional[int] = None
+
+
+class VoiceAlertRequest(BaseModel):
+    phone_number: str
+    cpa_nm: float
+    tcpa_min: float
+
+
+class AISNMEARequest(BaseModel):
+    raw_nmea: str = Field(..., description="Single or multi-line NMEA 0183 !AIVDM string")
+
+
+class SARDeclareRequest(BaseModel):
+    phone_number: str = Field(..., description="Registered fisherman's phone number")
+    reason: str = Field(default="OVERDUE_VOYAGE_MOTOR_FAILURE", description="SAR incident declaration reason")
+    hours_adrift: Optional[float] = Field(default=None, description="Estimated hours adrift")
+
+
+class WeatherBroadcastRequest(BaseModel):
+    landing_beach: str = Field(default="Keta Beach")
+    hazard: str = Field(default="SWELL_WARNING")
+    wave_height_m: float = Field(default=2.5)
+    wind_speed_kt: float = Field(default=22.0)
+
+
 # -------------------------------------------------------------------------
 # REST API Endpoints
 # -------------------------------------------------------------------------
@@ -199,6 +246,7 @@ def health_check() -> Dict[str, Any]:
         "version": "1.0.0",
         "active_geofences": engine.geofences.count_geofences(),
         "indexed_entities": engine.entity_index.total_items,
+        "durable_store": "SQLite WAL Active",
     }
 
 
@@ -309,9 +357,9 @@ def export_geofences() -> Dict[str, Any]:
     }
 
 
-@app.post("/v1/fleet/snapshot", tags=["Spatial Queries"])
-def snapshot_fleet() -> Dict[str, Any]:
-    """Capture point-in-time state checkpoint of all tracked fleet vehicles, positions, kinematics, and active breaches."""
+@app.api_route("/v1/fleet/snapshot", methods=["GET", "POST"], tags=["Spatial Queries"])
+def snapshot_fleet(request: Request) -> Dict[str, Any]:
+    """Capture or view point-in-time state checkpoint of all tracked fleet vessels, positions, and kinematics."""
     engine = get_engine()
     snapshot_id = f"snap_fleet_{int(time.time_ns())}"
     vehicles = []
@@ -340,6 +388,16 @@ def snapshot_fleet() -> Dict[str, Any]:
         "vehicles": vehicles,
         "status": "FLEET_SNAPSHOT_COMMITTED",
     }
+
+
+@app.post("/v1/fleet/clear", tags=["Spatial Queries"])
+def clear_fleet_test_entities() -> Dict[str, Any]:
+    """Reset tracked entities and clear active vessels from spatial index."""
+    engine = get_engine()
+    count = len(engine._entity_positions)
+    for ent_id in list(engine._entity_positions.keys()):
+        engine.remove_entity(ent_id)
+    return {"cleared": True, "entities_removed": count}
 
 
 @app.get("/v1/proximity", tags=["Spatial Queries"])
@@ -419,26 +477,6 @@ def get_collision_risk(
 # Telecom Passive LBS & Artisanal Fishermen Registry
 # -------------------------------------------------------------------------
 
-class RegisterSubscriberRequest(BaseModel):
-    phone_number: str = Field(..., description="Ghanaian mobile number (e.g. 0241234567)")
-    canoe_name: str = Field(..., description="Canoe name / registration (e.g. Nyimdzii)")
-    landing_beach: str = Field(default="Keta Beach", description="Landing beach")
-    language: str = Field(default="EWE", description="Primary mother tongue (EWE, GA, FANTE, ENGLISH)")
-
-
-class CellEventRequest(BaseModel):
-    phone_number: str = Field(..., description="Subscriber phone number")
-    tower_id: str = Field(..., description="Cell tower sector ID")
-    timing_advance: int = Field(default=0, ge=0, le=64, description="GSM Timing Advance (0..64, each step = 550m)")
-    timestamp_ns: Optional[int] = None
-
-
-class VoiceAlertRequest(BaseModel):
-    phone_number: str
-    cpa_nm: float
-    tcpa_min: float
-
-
 @app.post("/v1/telecom/register", status_code=status.HTTP_201_CREATED, tags=["Telecom LBS & Artisanal Registry"])
 def register_subscriber(req: RegisterSubscriberRequest) -> Dict[str, Any]:
     """
@@ -516,6 +554,43 @@ def ingest_cell_event(req: CellEventRequest) -> Dict[str, Any]:
     return res
 
 
+@app.post("/v1/telecom/carrier-webhook", tags=["Telecom LBS & Artisanal Registry"])
+async def receive_carrier_webhook(request: Request) -> Dict[str, Any]:
+    """Authenticated incoming webhook from Ghana telco aggregators (MTN/Telecel/Hubtel)."""
+    raw_body = await request.body()
+    sig = request.headers.get("X-Carrier-Signature") or request.headers.get("X-Hubtel-Signature")
+    secret = os.getenv("CARRIER_WEBHOOK_SECRET")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload in carrier webhook.")
+
+    try:
+        res = telecom_gateway.process_carrier_webhook(
+            payload=payload,
+            raw_body=raw_body,
+            signature_header=sig,
+            secret=secret,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    pos = res["derived_position"]
+    ping = TelemetryPing.create(
+        entity_id=f"canoe-{res['phone_number']}",
+        lat=pos["lat"],
+        lon=pos["lon"],
+        speed_mps=1.8 if res["status"] == "AT_SEA" else 0.0,
+        heading_deg=165.0,
+        timestamp_ns=res["timestamp_ns"],
+    )
+    engine = get_engine()
+    alerts = engine.ingest_telemetry(ping)
+    res["spatial_alerts"] = [{"event": str(a.event), "geofence_id": a.geofence_id} for a in alerts]
+    return res
+
+
 @app.post("/v1/telecom/alert/voice", tags=["Telecom LBS & Artisanal Registry"])
 def dispatch_voice_alert(req: VoiceAlertRequest) -> Dict[str, Any]:
     """Dispatch automated multilingual emergency voice call (IVR robocall) in Ewe, Ga, Fante, or English."""
@@ -526,73 +601,204 @@ def dispatch_voice_alert(req: VoiceAlertRequest) -> Dict[str, Any]:
             detail=f"Subscriber with phone '{req.phone_number}' not found in registry.",
         )
 
-    payload = MaritimeVoiceAlertService.generate_voice_payload(
-        phone_number=sub.phone_number,
-        canoe_name=sub.canoe_name,
-        language=sub.language,
+    res = telecom_gateway._voice_service.dispatch_alert_call(
+        subscriber=sub,
+        threat_vessel="Commercial Vessel (AIS Traffic)",
         cpa_nm=req.cpa_nm,
         tcpa_min=req.tcpa_min,
     )
-    return payload
+    return res
 
 
 # -------------------------------------------------------------------------
-# Embedded Interactive Leaflet.js Map Dashboard
+# AIS Radio Receiver Ingestion
+# -------------------------------------------------------------------------
+
+@app.post("/v1/ais/nmea", tags=["AIS Commercial Ship Telemetry"])
+def ingest_ais_nmea(req: AISNMEARequest) -> Dict[str, Any]:
+    """Decode raw NMEA 0183 !AIVDM VHF radio burst and stream into spatial mesh."""
+    report = ais_decoder.decode_sentence(req.raw_nmea)
+    if not report:
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to decode NMEA 0183 AIVDM sentence (invalid checksum, length, or unsupported type).",
+        )
+
+    if isinstance(report, AISPositionReport):
+        engine = get_engine()
+        ping = report.to_telemetry_ping()
+        alerts = engine.ingest_telemetry(ping)
+        return {
+            "decoded": True,
+            "type": "POSITION_REPORT",
+            "mmsi": report.mmsi,
+            "entity_id": ping.entity_id,
+            "lat": report.lat,
+            "lon": report.lon,
+            "speed_knots": report.sog_knots,
+            "heading_deg": report.heading_deg,
+            "nav_status": report.nav_status,
+            "alerts": [{"event": str(a.event), "geofence_id": a.geofence_id} for a in alerts],
+        }
+    elif isinstance(report, AISStaticReport):
+        return {
+            "decoded": True,
+            "type": "STATIC_VOYAGE_DATA",
+            "mmsi": report.mmsi,
+            "imo": report.imo,
+            "vessel_name": report.vessel_name,
+            "call_sign": report.call_sign,
+            "ship_type": report.ship_type,
+            "destination": report.destination,
+        }
+    return {"decoded": False}
+
+
+# -------------------------------------------------------------------------
+# Search and Rescue (SAR) & Weather Warnings
+# -------------------------------------------------------------------------
+
+@app.post("/v1/sar/declare", status_code=status.HTTP_201_CREATED, tags=["Search and Rescue (SAR)"])
+def declare_sar_incident(req: SARDeclareRequest) -> Dict[str, Any]:
+    """Declare Search and Rescue incident, extrapolating Guinea Current drift datum for Ghana Navy/GMA."""
+    try:
+        rec = sar_watchdog.declare_incident(
+            phone_number=req.phone_number,
+            reason=req.reason,
+            custom_hours_adrift=req.hours_adrift,
+        )
+        return {
+            "incident_id": rec.incident_id,
+            "phone_number": rec.phone_number,
+            "canoe_name": rec.canoe_name,
+            "landing_beach": rec.landing_beach,
+            "status": rec.status,
+            "last_known_fix": {"lat": rec.last_known_lat, "lon": rec.last_known_lon},
+            "projected_datum": {"lat": rec.datum_lat, "lon": rec.datum_lon},
+            "drift_distance_nm": rec.drift_distance_nm,
+            "search_radius_nm": rec.search_radius_nm,
+            "docket": json.loads(rec.gma_docket) if rec.gma_docket else {},
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/v1/sar/incidents", tags=["Search and Rescue (SAR)"])
+def list_sar_incidents(active_only: bool = Query(True)) -> Dict[str, Any]:
+    """List Search and Rescue incidents with projected drift coordinates."""
+    incidents = durable_store.list_sar_incidents(active_only=active_only)
+    return {
+        "total_incidents": len(incidents),
+        "incidents": [
+            {
+                "incident_id": inc.incident_id,
+                "phone_number": inc.phone_number,
+                "canoe_name": inc.canoe_name,
+                "landing_beach": inc.landing_beach,
+                "declared_at": inc.declared_at,
+                "last_known_fix": {"lat": inc.last_known_lat, "lon": inc.last_known_lon},
+                "projected_datum": {"lat": inc.datum_lat, "lon": inc.datum_lon},
+                "drift_distance_nm": inc.drift_distance_nm,
+                "search_radius_nm": inc.search_radius_nm,
+                "status": inc.status,
+                "docket": json.loads(inc.gma_docket) if inc.gma_docket else {},
+            }
+            for inc in incidents
+        ],
+    }
+
+
+@app.post("/v1/sar/resolve/{incident_id}", tags=["Search and Rescue (SAR)"])
+def resolve_sar_incident(incident_id: str) -> Dict[str, Any]:
+    """Close an active SAR incident upon safe recovery."""
+    success = durable_store.resolve_sar_incident(incident_id, "RESOLVED")
+    if not success:
+        raise HTTPException(status_code=404, detail=f"SAR incident '{incident_id}' not found.")
+    return {"resolved": True, "incident_id": incident_id, "status": "RESOLVED"}
+
+
+@app.post("/v1/weather/broadcast", tags=["Maritime Safety"])
+def broadcast_weather_alert(req: WeatherBroadcastRequest) -> Dict[str, Any]:
+    """Broadcast high-priority marine safety alert to all canoes currently at sea from a landing beach."""
+    subs = telecom_gateway.list_subscribers()
+    notified = []
+    for s in subs:
+        if s.status == VesselStatus.AT_SEA and (req.landing_beach.lower() in s.landing_beach.lower() or req.landing_beach == "ALL"):
+            notified.append({
+                "phone_number": s.phone_number,
+                "canoe_name": s.canoe_name,
+                "language": str(s.language),
+                "alert": f"DANGER: {req.hazard} - Wave swell {req.wave_height_m}m, winds {req.wind_speed_kt}kt. Head for shore immediately.",
+            })
+    return {
+        "hazard": req.hazard,
+        "landing_beach": req.landing_beach,
+        "total_canoes_notified": len(notified),
+        "dispatches": notified,
+    }
+
+
+# -------------------------------------------------------------------------
+# Embedded Interactive Leaflet.js Production Map Dashboard
 # -------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
 def get_map_dashboard() -> str:
-    """Serve embedded interactive real-time Ghana Maritime tracking dashboard."""
+    """Serve production real-time Ghana Maritime defense & safety dashboard."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>GeoMesh-Stream: Ghana Maritime Collision Avoidance & Coastal Radar</title>
+  <title>GeoMesh-Stream: Ghana Maritime Defense & Artisanal Safety</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #070d18; color: #f8fafc; }
     #container { display: flex; height: 100vh; }
-    #sidebar { width: 400px; background: #0f172a; padding: 22px; overflow-y: auto; border-right: 1px solid #1e293b; box-shadow: 2px 0 10px rgba(0,0,0,0.5); }
+    #sidebar { width: 420px; background: #0f172a; padding: 20px; overflow-y: auto; border-right: 1px solid #1e293b; box-shadow: 2px 0 10px rgba(0,0,0,0.5); }
     #map { flex-grow: 1; height: 100%; }
     h1 { font-size: 1.15rem; margin-top: 0; color: #38bdf8; display: flex; align-items: center; justify-content: space-between; }
-    .badge { font-size: 0.65rem; background: #0284c7; padding: 3px 8px; border-radius: 9999px; letter-spacing: 0.05em; font-weight: 700; }
-    .btn { background: #0284c7; color: white; border: none; padding: 10px 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 600; font-size: 0.85rem; margin-bottom: 14px; transition: background 0.2s; }
+    .badge-live { font-size: 0.65rem; background: #059669; padding: 3px 8px; border-radius: 9999px; letter-spacing: 0.05em; font-weight: 700; color: #fff; }
+    .btn { background: #0284c7; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; width: 100%; font-weight: 600; font-size: 0.8rem; margin-bottom: 8px; transition: background 0.2s; }
     .btn:hover { background: #0369a1; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 12px; margin-bottom: 14px; }
-    .card h3 { margin-top: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 8px; }
-    .event-log { font-family: monospace; font-size: 0.75rem; max-height: 260px; overflow-y: auto; background: #020617; padding: 10px; border-radius: 4px; line-height: 1.5; border: 1px solid #1e293b; }
+    .btn-warn { background: #b45309; }
+    .btn-warn:hover { background: #92400e; }
+    .btn-danger { background: #dc2626; }
+    .btn-danger:hover { background: #b91c1c; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+    .card h3 { margin-top: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 8px; display:flex; justify-content:space-between; align-items:center; }
+    .event-log { font-family: monospace; font-size: 0.75rem; max-height: 200px; overflow-y: auto; background: #020617; padding: 8px; border-radius: 4px; line-height: 1.5; border: 1px solid #1e293b; }
     .event-enter { color: #f87171; font-weight: 600; }
     .event-exit { color: #fbbf24; }
     .event-cpa { color: #ef4444; font-weight: 700; }
     .event-info { color: #38bdf8; }
+    .event-sar { color: #f59e0b; font-weight: 700; }
     .leaflet-tile { filter: invert(100%) hue-rotate(180deg) brightness(88%) contrast(90%); }
     .leaflet-container { background: #050b14; }
-    .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-right: 4px; margin-bottom: 4px; }
+    .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.68rem; margin-right: 4px; margin-bottom: 4px; }
   </style>
 </head>
 <body>
   <div id="container">
     <div id="sidebar">
-      <h1>GeoMesh-Stream <span class="badge">GULF OF GUINEA</span></h1>
-      <p style="font-size: 0.78rem; color: #94a3b8; line-height: 1.4; margin-top: 4px;">
-        Ghana Coastal Vessel Telemetry & Artisanal Safety Engine (Keta &bull; Tema &bull; Volta Estuary).
+      <h1>GeoMesh-Stream <span class="badge-live">&bull; LIVE SURVEILLANCE</span></h1>
+      <p style="font-size: 0.76rem; color: #94a3b8; line-height: 1.4; margin-top: 4px;">
+        Ghana Coastal Maritime Defense, Zero-Touch Telecom LBS &amp; Guinea Current SAR Center.
       </p>
-      
-      <button class="btn" onclick="startMaritimeSimulation()">Simulate Ghana Maritime Traffic</button>
-      <button class="btn" style="background:#059669;margin-top:-6px;" onclick="simulatePassiveTelecomTrip()">Simulate Passive Zero-Touch Lifecycle (Ewe Call)</button>
 
       <div class="card">
-        <h3>One-Time Fisherman Registration</h3>
+        <h3>One-Time Keypad Fisherman Registration</h3>
         <div style="display:flex;flex-direction:column;gap:6px;font-size:0.75rem;">
-          <input id="subPhone" type="text" placeholder="Phone (e.g. 0241234509)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
-          <input id="subCanoe" type="text" placeholder="Canoe Name (e.g. Mawuena)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+          <input id="subPhone" type="text" placeholder="Phone (+233241234567)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+          <input id="subCanoe" type="text" placeholder="Canoe Name (e.g. Nyame Nti)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
           <div style="display:flex;gap:6px;">
             <select id="subBeach" style="flex:1;background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;">
               <option value="Keta Beach">Keta Beach</option>
               <option value="Dzelukope">Dzelukope</option>
               <option value="Ada Foah">Ada Foah</option>
+              <option value="Prampram">Prampram</option>
               <option value="Jamestown">Jamestown</option>
+              <option value="Elmina">Elmina</option>
             </select>
             <select id="subLang" style="flex:1;background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;">
               <option value="EWE">Ewe (Keta)</option>
@@ -601,27 +807,41 @@ def get_map_dashboard() -> str:
               <option value="ENGLISH">English</option>
             </select>
           </div>
-          <button onclick="registerFisherman()" style="background:#4f46e5;color:#fff;border:none;padding:6px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.75rem;">Subscribe Once (Lifetime)</button>
+          <button onclick="registerFisherman()" style="background:#4f46e5;color:#fff;border:none;padding:6px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.75rem;">Enroll Once (Durable SQLite)</button>
         </div>
       </div>
 
       <div class="card">
-        <h3>Registered Artisanal Fleet (Passive Telco Status)</h3>
-        <div id="subscribersList" style="font-size:0.75rem;max-height:140px;overflow-y:auto;line-height:1.5;">Loading enrolled fishermen...</div>
+        <h3>Enrolled Fleet &amp; Voyage Status</h3>
+        <div id="subscribersList" style="font-size:0.74rem;max-height:130px;overflow-y:auto;line-height:1.5;">Loading subscribers...</div>
       </div>
 
       <div class="card">
-        <h3>Protected Maritime Zones</h3>
-        <div id="fenceList" style="font-size: 0.78rem; line-height: 1.6;">Loading Ghana maritime zones...</div>
+        <h3>Active SAR Incidents (Guinea Current)</h3>
+        <div id="sarList" style="font-size:0.74rem;max-height:100px;overflow-y:auto;line-height:1.4;color:#94a3b8;">No active search &amp; rescue operations.</div>
       </div>
 
       <div class="card">
-        <h3>Real-Time Collision & IEZ Incident Stream</h3>
-        <div id="eventLog" class="event-log">Monitoring Gulf of Guinea shipping lanes...</div>
+        <h3>Production Ingestion Actions</h3>
+        <button class="btn" onclick="testCarrierWebhook()">Send Carrier Handover Webhook (MTN Cape St. Paul)</button>
+        <button class="btn" style="background:#0891b2;" onclick="injectAISBurst()">Inject AIS Commercial Tanker (!AIVDM Radio)</button>
+        <button class="btn btn-warn" onclick="testVoiceRobocall()">Test Multilingual IVR Robocall (Ewe)</button>
+        <button class="btn btn-danger" onclick="declareEmergencySAR()">Declare SAR Overdue Emergency (Ghana Navy)</button>
+        <button class="btn" style="background:#334155;margin-bottom:0;" onclick="clearRadarEntities()">Clear Radar Entities</button>
+      </div>
+
+      <div class="card">
+        <h3>Protected Zones &amp; Boundaries</h3>
+        <div id="fenceList" style="font-size: 0.74rem; line-height: 1.6;">Loading Ghana maritime zones...</div>
+      </div>
+
+      <div class="card">
+        <h3>Real-Time Operational Audit Log</h3>
+        <div id="eventLog" class="event-log">Production surveillance active on Gulf of Guinea...</div>
       </div>
 
       <div style="font-size: 0.72rem; color: #64748b; text-align: center; line-height: 1.4;">
-        Ghana Maritime Authority &amp; Fisheries Commission API<br>
+        Ghana Maritime Authority &bull; Fisheries Commission (Act 625)<br>
         OpenAPI docs at <a href="/docs" target="_blank" style="color: #38bdf8;">/docs</a> &bull; <a href="/metrics" target="_blank" style="color: #38bdf8;">/metrics</a>
       </div>
     </div>
@@ -629,7 +849,6 @@ def get_map_dashboard() -> str:
   </div>
 
   <script>
-    // Center on Ghana coast (between Tema and Keta)
     const map = L.map('map').setView([5.78, 0.45], 10);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
@@ -637,6 +856,7 @@ def get_map_dashboard() -> str:
     }).addTo(map);
 
     const vesselMarkers = {};
+    const sarLayers = {};
     const logBox = document.getElementById('eventLog');
 
     function logEvent(text, typeClass) {
@@ -719,7 +939,7 @@ def get_map_dashboard() -> str:
         fillOpacity: 0.08,
         weight: 1.5,
         dashArray: '6, 6'
-      }).addTo(map).bindPopup('<b>Ghana Inshore Exclusion Zone (IEZ)</b><br>6 Nautical Mile Artisanal Fishing Reserve (Fisheries Act 625)');
+      }).addTo(map).bindPopup('<b>Ghana Inshore Exclusion Zone (IEZ)</b><br>6 Nautical Mile Artisanal Reserve (Fisheries Act 625)');
 
       // Togo Border Line Marker
       L.polyline([[6.1000, 1.2000], [5.5500, 1.2000]], {
@@ -735,6 +955,8 @@ def get_map_dashboard() -> str:
         <div><span class="zone-pill" style="background:#ef4444;color:#fff;">BORDER</span> <b>Ghana - Togo Maritime Line (Aflao)</b></div>
       `;
       await refreshSubscribers();
+      await refreshSAR();
+      await pollRadar();
     }
     initGhanaMaritime();
 
@@ -759,215 +981,182 @@ def get_map_dashboard() -> str:
               </div>
             `;
           }).join('');
-          document.getElementById('subscribersList').innerHTML = rows || '<div style="color:#64748b;">No registered fishermen yet.</div>';
+          document.getElementById('subscribersList').innerHTML = rows || '<div style="color:#64748b;">No fishermen enrolled yet.</div>';
         }
-      } catch(e) {}
+      } catch (e) {}
     }
 
+    async function refreshSAR() {
+      try {
+        const resp = await fetch('/v1/sar/incidents');
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.incidents.length === 0) {
+            document.getElementById('sarList').innerHTML = '<div style="color:#64748b;">No active SAR incidents.</div>';
+            return;
+          }
+          const html = data.incidents.map(inc => {
+            // Render Datum on map
+            const datum = inc.projected_datum;
+            if (!sarLayers[inc.incident_id]) {
+              const marker = L.circleMarker([datum.lat, datum.lon], {
+                radius: 8,
+                fillColor: '#dc2626',
+                color: '#fff',
+                weight: 2,
+                fillOpacity: 0.95
+              }).addTo(map).bindPopup(`<b>SAR DATUM: ${inc.canoe_name}</b><br>Drifted ${inc.drift_distance_nm} NM Eastward<br>Search Radius: ${inc.search_radius_nm} NM`);
+
+              const circle = L.circle([datum.lat, datum.lon], {
+                radius: inc.search_radius_nm * 1852,
+                color: '#ef4444',
+                fillColor: '#dc2626',
+                fillOpacity: 0.12,
+                dashArray: '5, 5'
+              }).addTo(map);
+
+              sarLayers[inc.incident_id] = { marker, circle };
+            }
+
+            return `
+              <div style="border-bottom:1px solid #334155;padding:4px 0;">
+                <strong style="color:#f87171;">${inc.canoe_name}</strong> <span style="font-size:0.68rem;color:#94a3b8;">(${inc.landing_beach})</span><br>
+                <span style="font-size:0.68rem;color:#fbbf24;">Datum: [${datum.lat.toFixed(4)}, ${datum.lon.toFixed(4)}] &bull; ${inc.drift_distance_nm} NM adrift</span>
+              </div>
+            `;
+          }).join('');
+          document.getElementById('sarList').innerHTML = html;
+        }
+      } catch (e) {}
+    }
+
+    async function pollRadar() {
+      try {
+        const resp = await fetch('/v1/fleet/snapshot');
+        if (resp.ok) {
+          const snap = await resp.json();
+          snap.vehicles.forEach(v => {
+            const isCanoe = v.entity_id.startsWith('canoe-');
+            const color = isCanoe ? '#10b981' : '#38bdf8';
+            const radius = isCanoe ? 7 : 9;
+
+            if (vesselMarkers[v.entity_id]) {
+              vesselMarkers[v.entity_id].setLatLng([v.position.lat, v.position.lon]);
+            } else {
+              vesselMarkers[v.entity_id] = L.circleMarker([v.position.lat, v.position.lon], {
+                radius: radius,
+                fillColor: color,
+                color: '#fff',
+                weight: 2,
+                fillOpacity: 0.95
+              }).addTo(map).bindPopup(`<b>${v.entity_id}</b><br>Pos: [${v.position.lat.toFixed(4)}, ${v.position.lon.toFixed(4)}]<br>Speed: ${v.kinematics.velocity_mps.toFixed(1)} m/s`);
+            }
+          });
+        }
+      } catch (e) {}
+    }
+
+    // Live continuous polling of server state (zero client-side synthetic simulations)
+    setInterval(pollRadar, 2500);
+    setInterval(refreshSubscribers, 5000);
+    setInterval(refreshSAR, 6000);
+
     async function registerFisherman() {
-      const phone = document.getElementById('subPhone').value;
-      const canoe = document.getElementById('subCanoe').value;
+      const phone = document.getElementById('subPhone').value.trim();
+      const canoe = document.getElementById('subCanoe').value.trim();
       const beach = document.getElementById('subBeach').value;
       const lang = document.getElementById('subLang').value;
       if (!phone || !canoe) {
-        alert('Please enter phone number and canoe name.');
+        alert('Please enter both phone number and canoe name.');
         return;
       }
       const resp = await fetch('/v1/telecom/register', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          phone_number: phone,
-          canoe_name: canoe,
-          landing_beach: beach,
-          language: lang
-        })
+        body: JSON.stringify({ phone_number: phone, canoe_name: canoe, landing_beach: beach, language: lang })
       });
       if (resp.ok) {
+        logEvent(`[LIFETIME SUBSCRIBER] Enrolled ${canoe} (${phone}) at ${beach}. Zero daily dials required.`, 'event-enter');
         document.getElementById('subPhone').value = '';
         document.getElementById('subCanoe').value = '';
-        logEvent(`[ENROLLMENT] ${canoe} (${phone}) registered permanently! Zero daily dialing required.`, 'event-enter');
         await refreshSubscribers();
       }
     }
 
-    async function simulatePassiveTelecomTrip() {
-      logEvent('=== SIMULATING ZERO-TOUCH PASSIVE TELCO LIFECYCLE ===', 'event-info');
-      logEvent('[PHASE 1] Canoe Nyimdzii leaves home in Keta town (Attached to Inland Tower)...', 'event-info');
-
-      // Step 1: Inland sector (on shore)
-      await fetch('/v1/telecom/cell-event', {
+    async function testCarrierWebhook() {
+      logEvent('[CARRIER WEBHOOK] Receiving incoming signaling event from MTN Ghana...', 'event-info');
+      const resp = await fetch('/v1/telecom/carrier-webhook', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           phone_number: '+233241234501',
-          tower_id: 'TOWER_KETA_INLAND',
-          timing_advance: 0
+          tower_id: 'TOWER_KETA_SEAWARD',
+          timing_advance: 14,
+          signal_dbm: -80
         })
       });
+      const data = await resp.json();
+      logEvent(`[PASSIVE TRIPWIRE] ${data.canoe_name} detected AT_SEA (${data.distance_offshore_km} km out) via Cape St. Paul TA=14.`, 'event-enter');
       await refreshSubscribers();
-
-      setTimeout(async () => {
-        logEvent('[PHASE 2] PASSIVE HANDOVER: Phone attaches to Cape St. Paul Seaward Tower (TA: 6 = 3.3km offshore)...', 'event-enter');
-        const evResp = await fetch('/v1/telecom/cell-event', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            phone_number: '+233241234501',
-            tower_id: 'TOWER_KETA_SEAWARD',
-            timing_advance: 6
-          })
-        });
-        const evData = await evResp.json();
-        logEvent(`[AUTO-DEPARTURE] ${evData.canoe_name} detected AT_SEA (${evData.distance_offshore_km} km out) - ZERO DIALING REQUIRED!`, 'event-enter');
-        await refreshSubscribers();
-
-        // Move marker to derived position
-        const pos = evData.derived_position;
-        if (vesselMarkers['canoe-keta-01']) {
-          vesselMarkers['canoe-keta-01'].setLatLng([pos.lat, pos.lon]);
-        } else {
-          vesselMarkers['canoe-keta-01'] = L.circleMarker([pos.lat, pos.lon], {
-            radius: 8,
-            fillColor: '#10b981',
-            color: '#fff',
-            weight: 2,
-            fillOpacity: 0.95
-          }).addTo(map).bindPopup(`<b>Canoe Nyimdzii</b><br>Derived via Timing Advance: ${evData.distance_offshore_km} km`);
-        }
-
-        // Step 3: Trigger IVR Emergency Voice Call in Ewe
-        setTimeout(async () => {
-          logEvent('[PHASE 3] TANKER CONVERGENCE: Disagreeable night trajectory detected!', 'event-cpa');
-          const voiceResp = await fetch('/v1/telecom/alert/voice', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              phone_number: '+233241234501',
-              cpa_nm: 0.75,
-              tcpa_min: 8.5
-            })
-          });
-          const voiceData = await voiceResp.json();
-          logEvent(`📞 [OUTGOING GSM CALL TO ${voiceData.recipient_phone}]: Automated Voice Call Connected!`, 'event-cpa');
-          logEvent(`🔊 [AUDIO PLAYBACK IN EWE]: "${voiceData.audio_message}"`, 'event-cpa');
-
-          // Step 4: Returning to Shore
-          setTimeout(async () => {
-            logEvent('[PHASE 4] RETURN TO SHORE: Canoe returns to beach, handover to Inland Tower...', 'event-info');
-            const retResp = await fetch('/v1/telecom/cell-event', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({
-                phone_number: '+233241234501',
-                tower_id: 'TOWER_KETA_INLAND',
-                timing_advance: 0
-              })
-            });
-            const retData = await retResp.json();
-            logEvent(`[SAFE LANDING] ${retData.canoe_name} marked ON_SHORE automatically. Watchdog reset.`, 'event-enter');
-            await refreshSubscribers();
-          }, 3500);
-
-        }, 2500);
-
-      }, 1800);
+      await pollRadar();
     }
 
-    let simInterval = null;
-    let simStep = 0;
+    async function injectAISBurst() {
+      logEvent('[AIS INGESTION] Processing raw NMEA 0183 !AIVDM radio burst from Tema Port VHF antenna...', 'event-info');
+      const sampleSentence = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
+      const resp = await fetch('/v1/ais/nmea', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ raw_nmea: sampleSentence })
+      });
+      const data = await resp.json();
+      logEvent(`[AIS DECODED] MMSI ${data.mmsi} (Speed: ${data.speed_knots}kt, Heading: ${data.heading_deg}°). Vessel mapped on radar.`, 'event-info');
+      await pollRadar();
+    }
 
-    function startMaritimeSimulation() {
-      if (simInterval) clearInterval(simInterval);
-      logBox.innerHTML = '<div class="event-info">Ghana maritime traffic stream started...</div>';
+    async function testVoiceRobocall() {
+      logEvent('[TELEPHONY] Dispatching automated emergency voice call in Ewe to +233241234501...', 'event-cpa');
+      const resp = await fetch('/v1/telecom/alert/voice', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          phone_number: '+233241234501',
+          cpa_nm: 0.65,
+          tcpa_min: 7.2
+        })
+      });
+      const data = await resp.json();
+      logEvent(`📞 [CALL CONNECTED - ${data.provider}]: Audio message in ${data.language}: "${data.audio_message}"`, 'event-cpa');
+    }
 
-      simInterval = setInterval(async () => {
-        simStep++;
+    async function declareEmergencySAR() {
+      logEvent('[SAR DECLARATION] Declaring emergency search & rescue for Keta canoe past return window...', 'event-sar');
+      const resp = await fetch('/v1/sar/declare', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          phone_number: '+233241234501',
+          reason: 'OUTBOARD_MOTOR_FAILURE_DRIFT',
+          hours_adrift: 5.5
+        })
+      });
+      const data = await resp.json();
+      logEvent(`🚨 [SAR DOCKET CREATED - ${data.incident_id}]: Guinea Current Datum: [${data.projected_datum.lat}, ${data.projected_datum.lon}], Search Radius: ${data.search_radius_nm} NM. Ghana Navy alerted!`, 'event-sar');
+      await refreshSAR();
+    }
 
-        // 1. Commercial Tanker MT African Runner (MMSI: 627001420)
-        // Traveling WSW along shipping channel towards Tema
-        const tankerLat = 5.7500 - (simStep * 0.0022);
-        const tankerLon = 0.8500 - (simStep * 0.0065);
-        const tankerResp = await fetch('/v1/telemetry', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            entity_id: 'tanker-african-runner',
-            lat: tankerLat,
-            lon: tankerLon,
-            speed_mps: 8.2, // ~16 knots
-            heading_deg: 245.0
-          })
-        });
-        const tankerData = await tankerResp.json();
-
-        // 2. Artisanal Canoe Keta-01 [Nyimdzii] (Local fishermen with smartphone GPS)
-        // Night drift-fishing off Cape St. Paul / Keta
-        const canoeLat = 5.8200 - (simStep * 0.0008);
-        const canoeLon = 0.8100 + (simStep * 0.0004);
-        const canoeResp = await fetch('/v1/telemetry', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            entity_id: 'canoe-keta-01',
-            lat: canoeLat,
-            lon: canoeLon,
-            speed_mps: 1.8, // ~3.5 knots
-            heading_deg: 155.0
-          })
-        });
-        const canoeData = await canoeResp.json();
-
-        // Update Map Markers
-        if (!vesselMarkers['tanker-african-runner']) {
-          vesselMarkers['tanker-african-runner'] = L.circleMarker([tankerLat, tankerLon], {
-            radius: 9,
-            fillColor: '#38bdf8',
-            color: '#fff',
-            weight: 2,
-            fillOpacity: 0.95
-          }).addTo(map).bindPopup('<b>MT African Runner</b><br>Crude Tanker (85,000 DWT)<br>Speed: 16.0 kt &bull; AIS Class A');
-        } else {
-          vesselMarkers['tanker-african-runner'].setLatLng([tankerLat, tankerLon]);
-        }
-
-        if (!vesselMarkers['canoe-keta-01']) {
-          vesselMarkers['canoe-keta-01'] = L.circleMarker([canoeLat, canoeLon], {
-            radius: 7,
-            fillColor: '#10b981',
-            color: '#fff',
-            weight: 2,
-            fillOpacity: 0.95
-          }).addTo(map).bindPopup('<b>Canoe Keta-01 [Nyimdzii]</b><br>Artisanal Fishermen (Phone GPS)<br>Speed: 3.5 kt &bull; Cape St. Paul');
-        } else {
-          vesselMarkers['canoe-keta-01'].setLatLng([canoeLat, canoeLon]);
-        }
-
-        // Query CPA between Tanker and Canoe
-        try {
-          const cpaResp = await fetch(`/v1/maritime/cpa?vessel_1=tanker-african-runner&vessel_2=canoe-keta-01`);
-          if (cpaResp.ok) {
-            const cpaData = await cpaResp.json();
-            if (cpaData.risk_level === 'CRITICAL_COLLISION_ALERT') {
-              logEvent(`CRITICAL COLLISION ALERT: MT African Runner CPA ${cpaData.cpa_nautical_miles} NM with Canoe Keta-01 (TCPA: ${cpaData.tcpa_minutes}m)`, 'event-cpa');
-            } else if (cpaData.risk_level === 'WARNING_CONVERGING') {
-              logEvent(`CONVERGING: MT African Runner & Canoe Keta-01 CPA ${cpaData.cpa_nautical_miles} NM (TCPA: ${cpaData.tcpa_minutes}m)`, 'event-exit');
-            }
-          }
-        } catch (e) {}
-
-        // Log geofence perimeter events
-        if (tankerData.alerts && tankerData.alerts.length > 0) {
-          tankerData.alerts.forEach(a => {
-            logEvent(`[TANKER] ${a.event} on ${a.geofence_id} (Dwell: ${a.dwell_duration_sec.toFixed(0)}s)`, a.event === 'ENTER' ? 'event-enter' : 'event-exit');
-          });
-        }
-        if (canoeData.alerts && canoeData.alerts.length > 0) {
-          canoeData.alerts.forEach(a => {
-            logEvent(`[CANOE] ${a.event} on ${a.geofence_id}`, 'event-info');
-          });
-        }
-      }, 1200);
+    async function clearRadarEntities() {
+      await fetch('/v1/fleet/clear', { method: 'POST' });
+      for (const id in vesselMarkers) {
+        map.removeLayer(vesselMarkers[id]);
+        delete vesselMarkers[id];
+      }
+      for (const id in sarLayers) {
+        map.removeLayer(sarLayers[id].marker);
+        map.removeLayer(sarLayers[id].circle);
+        delete sarLayers[id];
+      }
+      logEvent('[RADAR CLEARED] Transient vessels and SAR markers reset.', 'event-info');
     }
   </script>
 </body>
