@@ -824,8 +824,8 @@ def get_map_dashboard() -> str:
     .event-info { color: #38bdf8; }
     .event-enter { color: #10b981; }
 
-    .leaflet-tile { filter: invert(100%) hue-rotate(180deg) brightness(88%) contrast(90%); }
-    .leaflet-container { background: #050b14; }
+    /* Native dark tiles */
+    .leaflet-container { background: #070d19; }
     .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.66rem; margin-right: 4px; margin-bottom: 4px; }
   </style>
 </head>
@@ -851,11 +851,11 @@ def get_map_dashboard() -> str:
     <!-- Coastal Sector Quick Navigation -->
     <div id="navsectors">
       <span style="color:#64748b;line-height:24px;font-weight:600;">SECTOR JUMP:</span>
-      <button class="nav-btn active" onclick="zoomSector('ALL')">🇬🇭 Entire Ghana Coast (550km)</button>
-      <button class="nav-btn" onclick="zoomSector('WESTERN')">Western Region (Half Assini &bull; Axim &bull; Takoradi)</button>
-      <button class="nav-btn" onclick="zoomSector('CENTRAL')">Central Region (Elmina &bull; Cape Coast &bull; Winneba)</button>
-      <button class="nav-btn" onclick="zoomSector('ACCRA')">Greater Accra (Jamestown &bull; Tema &bull; Ada)</button>
-      <button class="nav-btn" onclick="zoomSector('VOLTA')">Volta Region (Cape St. Paul &bull; Keta &bull; Aflao)</button>
+      <button class="nav-btn active" onclick="zoomSector('ALL', this)">🇬🇭 Entire Ghana Coast (550km)</button>
+      <button class="nav-btn" onclick="zoomSector('WESTERN', this)">Western Region (Half Assini &bull; Axim &bull; Takoradi)</button>
+      <button class="nav-btn" onclick="zoomSector('CENTRAL', this)">Central Region (Elmina &bull; Cape Coast &bull; Winneba)</button>
+      <button class="nav-btn" onclick="zoomSector('ACCRA', this)">Greater Accra (Jamestown &bull; Tema &bull; Ada)</button>
+      <button class="nav-btn" onclick="zoomSector('VOLTA', this)">Volta Region (Cape St. Paul &bull; Keta &bull; Aflao)</button>
     </div>
 
     <div id="main">
@@ -961,11 +961,11 @@ def get_map_dashboard() -> str:
 
   <script>
     // National Map Initialization (Centered on Ghana Gulf of Guinea)
-    const map = L.map('map').setView([5.30, -0.85], 8);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 18,
+    const map = L.map('map', { zoomControl: true }).setView([5.30, -0.85], 8);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19, subdomains: 'abcd',
       attribution: '&copy; OpenStreetMap contributors &bull; Ghana Maritime Authority'
-    }).addTo(map);
+    }).addTo(map); setTimeout(() => { map.invalidateSize(); }, 250);
 
     const vesselMarkers = {};
     const sarMarkers = {};
@@ -978,9 +978,9 @@ def get_map_dashboard() -> str:
       logBox.prepend(line);
     }
 
-    function zoomSector(sec) {
+    function zoomSector(sec, el) {
       document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-      event.target.classList.add('active');
+      if (el) el.classList.add('active');
 
       if (sec === 'ALL') map.flyTo([5.30, -0.85], 8);
       else if (sec === 'WESTERN') map.flyTo([4.85, -2.00], 10);
@@ -1032,7 +1032,7 @@ def get_map_dashboard() -> str:
       L.circle([4.8900, -1.7200], { color: '#38bdf8', fillColor: '#0284c7', fillOpacity: 0.15, radius: 6000 }).addTo(map).bindPopup('<b>Takoradi Commercial Anchorage</b><br>Offshore Oil & Bauxite Roadstead');
 
       // 3. International Maritime Borders
-      L.polyline([[5.30, -3.10], [4.50, -3.10]], { color: '#ef4444', weight: 2, dashArray: '4, 4' }).addTo(map).bindPopup('<b>Ghana - Côte d\'Ivoire Maritime Border</b>');
+      L.polyline([[5.30, -3.10], [4.50, -3.10]], { color: '#ef4444', weight: 2, dashArray: '4, 4' }).addTo(map).bindPopup('<b>Ghana - Ivory Coast Maritime Border</b>');
       L.polyline([[6.15, 1.20], [5.30, 1.20]], { color: '#ef4444', weight: 2, dashArray: '4, 4' }).addTo(map).bindPopup('<b>Ghana - Togo Maritime Border</b>');
 
       // 4. Render All 20+ Coastal Cell Towers
