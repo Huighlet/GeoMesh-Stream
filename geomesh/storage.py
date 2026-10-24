@@ -237,6 +237,14 @@ class DurableStore:
             cursor.execute("SELECT * FROM subscribers ORDER BY registered_at DESC;")
             return [SubscriberRecord(**dict(row)) for row in cursor.fetchall()]
 
+    def delete_subscriber(self, phone_number: str) -> bool:
+        with self._lock:
+            conn = self._get_conn()
+            with conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM subscribers WHERE phone_number = ?;", (phone_number,))
+                return cursor.rowcount > 0
+
     # -------------------------------------------------------------------------
     # Voyage & Cell Event Operations
     # -------------------------------------------------------------------------

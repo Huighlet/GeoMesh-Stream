@@ -2,7 +2,7 @@
 
 **Real-Time Ghana Maritime Vessel Stream, Collision Avoidance & Coastal Geofence Engine**
 
-[![Build Status](https://img.shields.io/badge/tests-39%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
+[![Build Status](https://img.shields.io/badge/tests-42%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Zero AI Slop](https://img.shields.io/badge/codebase-zero%20ai%20slop-black.svg)](https://github.com/Huighlet/GeoMesh-Stream)
@@ -11,18 +11,19 @@
 
 ## Executive Summary
 
-Coastal maritime environments in the **Gulf of Guinea** present an acute dual-class safety challenge: heavy industrial commercial vessels (crude oil tankers and container carriers calling at **Tema Port**) navigate shared waters alongside thousands of **Ghanaian artisanal wooden fishing canoes** (operating out of **Keta, Cape St. Paul, Ada Foah, and Prampram**). While commercial ships transmit Class-A AIS transponder telemetry, artisanal fishermen navigate with standard \$10 keypad feature phones ("yam phones") without GPS apps, smartphones, or data connectivity. Requiring daily manual dialing or USSD codes leads to non-compliance and fatal collision blindspots.
+Coastal maritime environments across Ghana's **550km Gulf of Guinea coastline** present an acute dual-class safety challenge: heavy industrial commercial vessels (crude oil tankers and container carriers calling at **Tema and Takoradi Ports**) navigate shared waters alongside thousands of **Ghanaian artisanal wooden fishing canoes** (operating out of **Half Assini, Axim, Sekondi, Elmina, Cape Coast, Winneba, Jamestown, Tema, Ada Foah, and Keta**). While commercial ships transmit Class-A AIS transponder telemetry, artisanal fishermen navigate with standard \$10 keypad feature phones ("yam phones") without GPS apps, smartphones, or data connectivity. Requiring daily manual dialing or USSD codes leads to non-compliance and fatal collision blindspots.
 
 **GeoMesh-Stream** bridges this divide as an ultra-low latency, zero-dependency streaming geospatial engine written in Python 3.13. It unifies dual-class vessel telemetry into a high-performance **Discrete Spatial Grid Index ($\mathcal{O}(1)$ AABB candidate pruning)** and a **Zero-Touch Passive Telecom LBS Engine**:
-1. **Zero-Touch Keypad Phone Safety:** Fishermen enroll once at the landing beach with their phone number, canoe name, and native language (**Ewe** in Keta, **Ga** in Jamestown, **Fante** in Elmina). Zero daily dialing is required.
-2. **GSM Timing Advance (TA) Coordinate Derivation:** The passive telecom gateway derives offshore coordinates directly from cell tower radio propagation delays ($TA \times 550\text{m}$) and sector antenna azimuths (e.g., Cape St. Paul Seaward Sector).
+1. **Zero-Touch Keypad Phone Safety:** Fishermen enroll once at the landing beach with their phone number, canoe name, and native mother tongue (**Ewe** in Volta, **Dangme** in Ada/Prampram, **Ga** in Greater Accra, **Fante** in Central, and **Nzema** in Western Region). Zero daily dialing is required.
+2. **GSM Timing Advance (TA) Coordinate Derivation:** The passive telecom gateway derives offshore coordinates directly from 27 real coastal cell tower radio propagation delays ($TA \times 550\text{m}$) and sector antenna azimuths across all 4 maritime regions.
 3. **Passive Cell Handover Tripwires:** Handover from an inland sector to a seaward sector automatically transitions the canoe from `ON_SHORE` to `AT_SEA`. Handover back inland automatically registers `RETURNED_SAFELY`.
-4. **Closest Point of Approach (CPA & TCPA):** Computes relative kinematic vectors to detect collision trajectories when industrial tankers converge within 1.0 Nautical Mile of artisanal canoes.
-5. **Mother-Tongue IVR Robocalls:** Automatically triggers instant audible phone calls in the fisherman's native dialect (Ewe/Ga/Fante) when CPA risk thresholds are breached.
-6. **Ghana Inshore Exclusion Zone (IEZ) Enforcement:** Mathematically evaluates vessel boundaries against the 6-Nautical-Mile artisanal reserve codified under the **Ghana Fisheries Act (Act 625)** to detect illegal industrial trawler incursions.
-7. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Models physical ocean currents ($\approx 1.4\text{ kt}$ Eastward) and wind leeway to calculate search datums and generate formal SAR Incident Dockets for the Ghana Maritime Authority (GMA) and Ghana Navy Eastern Naval Command (Tema).
-8. **Direct NMEA 0183 AIS Radio Decoder:** Zero-dependency bit-level parser for raw VHF `!AIVDM` sentences from coastal AIS stations (Types 1, 2, 3 position reports and Type 5 static voyage data).
-9. **Durable SQLite WAL Storage & Carrier Webhook Gateway:** Zero-loss persistence for subscribers, voyages, and SAR dockets, paired with HMAC-SHA256 authenticated webhook ingestion for MTN Ghana, Telecel, and Hubtel.
+4. **Automated Overdue Voyage Alarms & Keypad SOS:** If a vessel remains at sea past its expected voyage duration (default 14h), the system automatically flags an `OVERDUE` alert to shore. Fishermen can also trigger an instant distress broadcast by flashing `*920*44#` or texting `SOS` to `1990`.
+5. **Closest Point of Approach (CPA & TCPA):** Computes relative kinematic vectors to detect collision trajectories when industrial tankers converge within 1.0 Nautical Mile of artisanal canoes.
+6. **Mother-Tongue IVR Robocalls:** Automatically triggers instant audible phone calls in the fisherman's native dialect (Ewe, Ga, Fante, Dangme, or Nzema) through the loudspeaker when CPA risk thresholds are breached.
+7. **Ghana Inshore Exclusion Zone (IEZ) Enforcement:** Mathematically evaluates vessel boundaries against the statutory 6-Nautical-Mile artisanal reserve codified under the **Ghana Fisheries Act (Act 625)** spanning the entire 550km coastline from Half Assini ($3.1^\circ\text{ W}$) to Aflao ($1.2^\circ\text{ E}$) to detect illegal industrial trawler incursions.
+8. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Models physical ocean currents ($\approx 1.4\text{ kt}$ Eastward) and wind leeway to calculate search datums and generate formal SAR Incident Dockets for the Ghana Maritime Authority (GMA) and Ghana Navy (Western and Eastern Naval Commands).
+9. **Direct NMEA 0183 AIS Radio Decoder:** Zero-dependency bit-level parser for raw VHF `!AIVDM` sentences from coastal AIS stations (Types 1, 2, 3 position reports and Type 5 static voyage data).
+10. **Durable SQLite WAL Storage & Carrier Webhook Gateway:** Zero-loss persistence for subscribers, voyages, and SAR dockets, paired with HMAC-SHA256 authenticated webhook ingestion for MTN Ghana, Telecel, and Hubtel, with a clean operational registry.
 
 ---
 

@@ -51,26 +51,7 @@ ais_decoder = AISDecoder()
 _telemetry_pings_total = 0
 _geofence_breaches_total = 0
 
-# Seed initial registered Ghanaian artisanal fishermen if table is empty
-if len(telecom_gateway.list_subscribers()) == 0:
-    telecom_gateway.register_subscriber(
-        phone_number="+233241234501",
-        canoe_name="Nyimdzii [Keta-01]",
-        landing_beach="Keta Beach",
-        language=Language.EWE,
-    )
-    telecom_gateway.register_subscriber(
-        phone_number="+233241234502",
-        canoe_name="Mawueyro [Keta-02]",
-        landing_beach="Dzelukope",
-        language=Language.EWE,
-    )
-    telecom_gateway.register_subscriber(
-        phone_number="+233241234503",
-        canoe_name="Oshu [Jamestown-01]",
-        landing_beach="Jamestown",
-        language=Language.GA,
-    )
+# Clean state backed by SQLite WAL database - no hardcoded mock fishermen
 
 
 class RateLimiter:
@@ -742,121 +723,252 @@ def broadcast_weather_alert(req: WeatherBroadcastRequest) -> Dict[str, Any]:
 # Embedded Interactive Leaflet.js Production Map Dashboard
 # -------------------------------------------------------------------------
 
+class SOSRequest(BaseModel):
+    phone_number: str = Field(..., description="Subscriber phone number triggering SOS")
+    message: str = Field(default="SOS_MAYDAY_ENGINE_FAILURE", description="Distress message or reason")
+
+
+@app.post("/v1/telecom/sos", tags=["Telecom LBS & Artisanal Registry"])
+def trigger_keypad_sos(req: SOSRequest) -> Dict[str, Any]:
+    """Process incoming emergency SOS distress signal sent from a keypad phone (SMS or USSD *920*44#)."""
+    res = telecom_gateway.trigger_sos(phone_number=req.phone_number, message=req.message)
+    # Immediately declare SAR distress incident docket for Ghana Navy & GMA
+    sar_inc = sar_watchdog.declare_incident(
+        phone_number=req.phone_number,
+        reason=f"EMERGENCY_KEYPAD_SOS: {req.message}",
+        custom_hours_adrift=0.5,
+    )
+    res["sar_incident_id"] = sar_inc.incident_id
+    res["projected_datum"] = {"lat": sar_inc.datum_lat, "lon": sar_inc.datum_lon}
+    res["search_radius_nm"] = sar_inc.search_radius_nm
+    return res
+
+
+@app.delete("/v1/telecom/subscribers/{phone_number}", tags=["Telecom LBS & Artisanal Registry"])
+def delete_subscriber(phone_number: str) -> Dict[str, Any]:
+    """Unenroll / delete a registered artisanal canoe from system memory and database."""
+    success = telecom_gateway.delete_subscriber(phone_number)
+    return {"deleted": success, "phone_number": phone_number}
+
+
+@app.get("/v1/telecom/towers", tags=["Telecom LBS & Artisanal Registry"])
+def list_coastal_towers() -> Dict[str, Any]:
+    """Retrieve all coastal GSM/LTE cell towers spanning the 550km Ghana coastline."""
+    towers = telecom_gateway.list_towers()
+    return {
+        "total_towers": len(towers),
+        "towers": [
+            {
+                "tower_id": t.tower_id,
+                "name": t.name,
+                "lat": t.lat,
+                "lon": t.lon,
+                "sector_type": t.sector_type,
+                "azimuth_deg": t.azimuth_deg,
+                "region": t.region,
+            }
+            for t in towers
+        ],
+    }
+# -------------------------------------------------------------------------
+# Embedded Interactive Leaflet.js Production Map Dashboard
+# -------------------------------------------------------------------------
+
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
 def get_map_dashboard() -> str:
-    """Serve production real-time Ghana Maritime defense & safety dashboard."""
+    """Serve GH-MARSAR National Coastal Operations Command Center."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>GeoMesh-Stream: Ghana Maritime Defense & Artisanal Safety</title>
+  <title>GH-MARSAR: Ghana National Maritime Rescue & Artisanal Safety Network (GeoMesh-Stream)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #070d18; color: #f8fafc; }
-    #container { display: flex; height: 100vh; }
-    #sidebar { width: 420px; background: #0f172a; padding: 20px; overflow-y: auto; border-right: 1px solid #1e293b; box-shadow: 2px 0 10px rgba(0,0,0,0.5); }
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #060a12; color: #f8fafc; }
+    #container { display: flex; height: 100vh; flex-direction: column; }
+    
+    /* Top National Header */
+    #topbar { background: #0b1120; border-bottom: 2px solid #1e293b; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
+    .gh-flag { display: inline-flex; height: 14px; width: 22px; border-radius: 2px; overflow: hidden; margin-right: 8px; vertical-align: middle; }
+    .gh-red { flex: 1; background: #ce1126; }
+    .gh-yellow { flex: 1; background: #fcd116; }
+    .gh-green { flex: 1; background: #006b3f; }
+    .stat-badge { background: #1e293b; border: 1px solid #334155; padding: 6px 12px; border-radius: 6px; font-size: 0.76rem; display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
+    .stat-val { font-weight: 700; color: #38bdf8; font-size: 0.85rem; }
+    .stat-sos { color: #ef4444; font-weight: 800; }
+
+    /* Sector Navigation Bar */
+    #navsectors { background: #0f172a; border-bottom: 1px solid #1e293b; padding: 6px 20px; display: flex; gap: 8px; font-size: 0.74rem; overflow-x: auto; }
+    .nav-btn { background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; font-weight: 600; }
+    .nav-btn:hover, .nav-btn.active { background: #0284c7; color: #fff; border-color: #38bdf8; }
+
+    #main { display: flex; flex: 1; height: calc(100vh - 90px); }
+    #sidebar { width: 440px; background: #0b1120; padding: 16px; overflow-y: auto; border-right: 1px solid #1e293b; box-shadow: 2px 0 10px rgba(0,0,0,0.5); }
     #map { flex-grow: 1; height: 100%; }
-    h1 { font-size: 1.15rem; margin-top: 0; color: #38bdf8; display: flex; align-items: center; justify-content: space-between; }
-    .badge-live { font-size: 0.65rem; background: #059669; padding: 3px 8px; border-radius: 9999px; letter-spacing: 0.05em; font-weight: 700; color: #fff; }
+
+    .card { background: #131c2e; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+    .card-emergency { border-color: #ef4444; background: #1c131a; box-shadow: 0 0 10px rgba(239,68,68,0.15); }
+    .card h3 { margin-top: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 8px; display:flex; justify-content:space-between; align-items:center; }
+    .card-emergency h3 { color: #f87171; }
+    
     .btn { background: #0284c7; color: white; border: none; padding: 8px 12px; border-radius: 5px; cursor: pointer; width: 100%; font-weight: 600; font-size: 0.8rem; margin-bottom: 8px; transition: background 0.2s; }
     .btn:hover { background: #0369a1; }
-    .btn-warn { background: #b45309; }
-    .btn-warn:hover { background: #92400e; }
     .btn-danger { background: #dc2626; }
     .btn-danger:hover { background: #b91c1c; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
-    .card h3 { margin-top: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 8px; display:flex; justify-content:space-between; align-items:center; }
-    .event-log { font-family: monospace; font-size: 0.75rem; max-height: 200px; overflow-y: auto; background: #020617; padding: 8px; border-radius: 4px; line-height: 1.5; border: 1px solid #1e293b; }
-    .event-enter { color: #f87171; font-weight: 600; }
-    .event-exit { color: #fbbf24; }
+    .btn-sm { padding: 3px 6px; font-size: 0.68rem; width: auto; margin-bottom: 0; }
+    
+    .event-log { font-family: monospace; font-size: 0.73rem; max-height: 180px; overflow-y: auto; background: #030712; padding: 8px; border-radius: 4px; line-height: 1.5; border: 1px solid #1e293b; }
     .event-cpa { color: #ef4444; font-weight: 700; }
-    .event-info { color: #38bdf8; }
     .event-sar { color: #f59e0b; font-weight: 700; }
+    .event-info { color: #38bdf8; }
+    .event-enter { color: #10b981; }
+
     .leaflet-tile { filter: invert(100%) hue-rotate(180deg) brightness(88%) contrast(90%); }
     .leaflet-container { background: #050b14; }
-    .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.68rem; margin-right: 4px; margin-bottom: 4px; }
+    .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.66rem; margin-right: 4px; margin-bottom: 4px; }
   </style>
 </head>
 <body>
   <div id="container">
-    <div id="sidebar">
-      <h1>GeoMesh-Stream <span class="badge-live">&bull; LIVE SURVEILLANCE</span></h1>
-      <p style="font-size: 0.76rem; color: #94a3b8; line-height: 1.4; margin-top: 4px;">
-        Ghana Coastal Maritime Defense, Zero-Touch Telecom LBS &amp; Guinea Current SAR Center.
-      </p>
-
-      <div class="card">
-        <h3>One-Time Keypad Fisherman Registration</h3>
-        <div style="display:flex;flex-direction:column;gap:6px;font-size:0.75rem;">
-          <input id="subPhone" type="text" placeholder="Phone (+233241234567)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
-          <input id="subCanoe" type="text" placeholder="Canoe Name (e.g. Nyame Nti)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
-          <div style="display:flex;gap:6px;">
-            <select id="subBeach" style="flex:1;background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;">
-              <option value="Keta Beach">Keta Beach</option>
-              <option value="Dzelukope">Dzelukope</option>
-              <option value="Ada Foah">Ada Foah</option>
-              <option value="Prampram">Prampram</option>
-              <option value="Jamestown">Jamestown</option>
-              <option value="Elmina">Elmina</option>
-            </select>
-            <select id="subLang" style="flex:1;background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;">
-              <option value="EWE">Ewe (Keta)</option>
-              <option value="GA">Ga (Accra)</option>
-              <option value="FANTE">Fante</option>
-              <option value="ENGLISH">English</option>
-            </select>
-          </div>
-          <button onclick="registerFisherman()" style="background:#4f46e5;color:#fff;border:none;padding:6px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.75rem;">Enroll Once (Durable SQLite)</button>
+    <!-- Top National Command Bar -->
+    <div id="topbar">
+      <div style="display:flex;align-items:center;">
+        <span class="gh-flag"><span class="gh-red"></span><span class="gh-yellow"></span><span class="gh-green"></span></span>
+        <div>
+          <strong style="color:#f8fafc;font-size:0.95rem;letter-spacing:0.02em;">GH-MARSAR &bull; GHANA NATIONAL MARITIME RESCUE &amp; COASTAL SAFETY NETWORK</strong>
+          <div style="font-size:0.68rem;color:#94a3b8;">550km Gulf of Guinea Coastline &bull; Fisheries Act 625 6NM Exclusion Zone &bull; Keypad Feature Phone LBS</div>
         </div>
       </div>
-
-      <div class="card">
-        <h3>Enrolled Fleet &amp; Voyage Status</h3>
-        <div id="subscribersList" style="font-size:0.74rem;max-height:130px;overflow-y:auto;line-height:1.5;">Loading subscribers...</div>
-      </div>
-
-      <div class="card">
-        <h3>Active SAR Incidents (Guinea Current)</h3>
-        <div id="sarList" style="font-size:0.74rem;max-height:100px;overflow-y:auto;line-height:1.4;color:#94a3b8;">No active search &amp; rescue operations.</div>
-      </div>
-
-      <div class="card">
-        <h3>Production Ingestion Actions</h3>
-        <button class="btn" onclick="testCarrierWebhook()">Send Carrier Handover Webhook (MTN Cape St. Paul)</button>
-        <button class="btn" style="background:#0891b2;" onclick="injectAISBurst()">Inject AIS Commercial Tanker (!AIVDM Radio)</button>
-        <button class="btn btn-warn" onclick="testVoiceRobocall()">Test Multilingual IVR Robocall (Ewe)</button>
-        <button class="btn btn-danger" onclick="declareEmergencySAR()">Declare SAR Overdue Emergency (Ghana Navy)</button>
-        <button class="btn" style="background:#334155;margin-bottom:0;" onclick="clearRadarEntities()">Clear Radar Entities</button>
-      </div>
-
-      <div class="card">
-        <h3>Protected Zones &amp; Boundaries</h3>
-        <div id="fenceList" style="font-size: 0.74rem; line-height: 1.6;">Loading Ghana maritime zones...</div>
-      </div>
-
-      <div class="card">
-        <h3>Real-Time Operational Audit Log</h3>
-        <div id="eventLog" class="event-log">Production surveillance active on Gulf of Guinea...</div>
-      </div>
-
-      <div style="font-size: 0.72rem; color: #64748b; text-align: center; line-height: 1.4;">
-        Ghana Maritime Authority &bull; Fisheries Commission (Act 625)<br>
-        OpenAPI docs at <a href="/docs" target="_blank" style="color: #38bdf8;">/docs</a> &bull; <a href="/metrics" target="_blank" style="color: #38bdf8;">/metrics</a>
+      <div>
+        <div class="stat-badge">ENROLLED FLEET: <span id="statEnrolled" class="stat-val">0</span></div>
+        <div class="stat-badge">AT SEA: <span id="statAtSea" class="stat-val" style="color:#38bdf8;">0</span></div>
+        <div class="stat-badge">ON SHORE: <span id="statOnShore" class="stat-val" style="color:#10b981;">0</span></div>
+        <div class="stat-badge" style="border-color:#ef4444;">🚨 OVERDUE / SOS: <span id="statSOS" class="stat-sos">0</span></div>
       </div>
     </div>
-    <div id="map"></div>
+
+    <!-- Coastal Sector Quick Navigation -->
+    <div id="navsectors">
+      <span style="color:#64748b;line-height:24px;font-weight:600;">SECTOR JUMP:</span>
+      <button class="nav-btn active" onclick="zoomSector('ALL')">🇬🇭 Entire Ghana Coast (550km)</button>
+      <button class="nav-btn" onclick="zoomSector('WESTERN')">Western Region (Half Assini &bull; Axim &bull; Takoradi)</button>
+      <button class="nav-btn" onclick="zoomSector('CENTRAL')">Central Region (Elmina &bull; Cape Coast &bull; Winneba)</button>
+      <button class="nav-btn" onclick="zoomSector('ACCRA')">Greater Accra (Jamestown &bull; Tema &bull; Ada)</button>
+      <button class="nav-btn" onclick="zoomSector('VOLTA')">Volta Region (Cape St. Paul &bull; Keta &bull; Aflao)</button>
+    </div>
+
+    <div id="main">
+      <div id="sidebar">
+
+        <!-- 1. EMERGENCY MISSING BOAT & SAR HOTLINE -->
+        <div class="card card-emergency">
+          <h3>🚨 MISSING BOAT AT SEA / REPORT OVERDUE CANOE <span style="font-size:0.65rem;background:#dc2626;color:#fff;padding:2px 6px;border-radius:4px;">GMA &amp; NAVY</span></h3>
+          <p style="font-size:0.72rem;color:#cbd5e1;line-height:1.4;margin:4px 0 8px 0;">
+            If an artisanal canoe fails to return from night fishing or engine breaks down, enter boat details below. The system pulls the last tower contact, extrapolates the <strong>Guinea Current drift datum</strong>, and alerts the Ghana Navy.
+          </p>
+          <div style="display:flex;gap:6px;margin-bottom:8px;">
+            <input id="sarInput" type="text" placeholder="Phone or Canoe Name (e.g. Nyame Nti)" style="flex:1;background:#090d16;border:1px solid #475569;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+            <button class="btn btn-danger btn-sm" onclick="reportMissingBoat()" style="white-space:nowrap;">DECLARE SAR</button>
+          </div>
+          <div id="activeSARBox" style="font-size:0.72rem;max-height:110px;overflow-y:auto;line-height:1.4;color:#94a3b8;border-top:1px solid #334155;padding-top:6px;">
+            No active missing boat incidents.
+          </div>
+        </div>
+
+        <!-- 2. ONE-TIME CANOE REGISTRATION -->
+        <div class="card">
+          <h3>Enroll Artisanal Canoe (Feature Phone) <span style="font-size:0.65rem;background:#059669;color:#fff;padding:2px 6px;border-radius:4px;">ZERO DAILY DIAL</span></h3>
+          <div style="display:flex;flex-direction:column;gap:6px;font-size:0.75rem;">
+            <input id="regPhone" type="text" placeholder="Phone Number (e.g. 0244123456)" style="background:#090d16;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+            <input id="regCanoe" type="text" placeholder="Canoe Name (e.g. Nyame Nti)" style="background:#090d16;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+            <div style="display:flex;gap:6px;">
+              <select id="regBeach" style="flex:1;background:#090d16;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.74rem;">
+                <option value="Keta Beach">Volta: Keta Beach</option>
+                <option value="Dzelukope">Volta: Dzelukope</option>
+                <option value="Anloga">Volta: Anloga</option>
+                <option value="Aflao">Volta: Aflao</option>
+                <option value="Ada Foah">Accra: Ada Foah</option>
+                <option value="Prampram">Accra: Prampram</option>
+                <option value="Tema Manhean">Accra: Tema Manhean</option>
+                <option value="Jamestown">Accra: Jamestown</option>
+                <option value="Chorkor">Accra: Chorkor</option>
+                <option value="Winneba">Central: Winneba</option>
+                <option value="Apam">Central: Apam</option>
+                <option value="Saltpond">Central: Saltpond</option>
+                <option value="Cape Coast">Central: Cape Coast</option>
+                <option value="Elmina">Central: Elmina</option>
+                <option value="Sekondi">Western: Sekondi</option>
+                <option value="Takoradi">Western: Takoradi</option>
+                <option value="Dixcove">Western: Dixcove</option>
+                <option value="Axim">Western: Axim</option>
+                <option value="Half Assini">Western: Half Assini</option>
+              </select>
+              <select id="regLang" style="flex:1;background:#090d16;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.74rem;">
+                <option value="EWE">Ewe (Volta)</option>
+                <option value="GA">Ga (Accra)</option>
+                <option value="FANTE">Fante (Central)</option>
+                <option value="DANGME">Dangme (Ada/Prampram)</option>
+                <option value="NZEMA">Nzema (Western)</option>
+                <option value="ENGLISH">English</option>
+              </select>
+            </div>
+            <button onclick="enrollCanoe()" style="background:#4f46e5;color:#fff;border:none;padding:8px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.78rem;">Register Canoe Once (Permanent)</button>
+          </div>
+        </div>
+
+        <!-- 3. HOW DOES IT PROTECT SMALL BOATS -->
+        <div class="card" style="background:#0e1726;border-color:#1e293b;">
+          <h3 style="color:#38bdf8;">How Are Artisanal Fishermen Protected?</h3>
+          <ul style="font-size:0.72rem;color:#94a3b8;line-height:1.5;margin:0;padding-left:16px;">
+            <li><strong style="color:#f8fafc;">Audible Night Voice Robocall:</strong> If a 100,000-ton ship enters 1.0 NM at night, the phone rings loudly speaking <em>Ewe, Ga, Fante, Dangme, or Nzema</em>.</li>
+            <li><strong style="color:#f8fafc;">Zero-Touch Tripwire:</strong> Cell towers passively track departure and return when canoes switch between inland and seaward antennas. No dialing needed.</li>
+            <li><strong style="color:#f8fafc;">Keypad SOS (*920*44#):</strong> In an emergency, sending SMS "SOS" to 1990 immediately triggers a Navy rescue alert.</li>
+            <li><strong style="color:#f8fafc;">Guinea Current Drift Modeling:</strong> When engines fail, the system calculates the exact eastward ocean drift datum towards Togo.</li>
+          </ul>
+        </div>
+
+        <!-- 4. ENROLLED CANOE ROSTER -->
+        <div class="card">
+          <h3>Enrolled Artisanal Roster <span id="rosterCount" style="color:#38bdf8;">0 boats</span></h3>
+          <div id="fleetTable" style="font-size:0.72rem;max-height:160px;overflow-y:auto;line-height:1.4;">
+            Loading registered canoes...
+          </div>
+        </div>
+
+        <!-- 5. PRODUCTION FIELD TRIGGERS -->
+        <div class="card">
+          <h3>Production Operational Actions</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+            <button class="btn btn-sm" onclick="simulateKeypadSOS()">Trigger Keypad SOS (*920*44#)</button>
+            <button class="btn btn-sm" style="background:#0891b2;" onclick="injectAISVessel()">Inject AIS Tanker (Tema VHF)</button>
+            <button class="btn btn-sm" style="background:#059669;" onclick="simulateSeawardTrip()">Simulate Seaward Launch</button>
+            <button class="btn btn-sm" style="background:#334155;" onclick="clearRadar()">Clear Test Radar Marks</button>
+          </div>
+        </div>
+
+        <!-- 6. AUDIT LOG -->
+        <div class="card">
+          <h3>Operational Audit Stream</h3>
+          <div id="eventLog" class="event-log">National surveillance active across 550km coastline...</div>
+        </div>
+
+      </div>
+
+      <div id="map"></div>
+    </div>
   </div>
 
   <script>
-    const map = L.map('map').setView([5.78, 0.45], 10);
+    // National Map Initialization (Centered on Ghana Gulf of Guinea)
+    const map = L.map('map').setView([5.30, -0.85], 8);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
-      attribution: '&copy; OpenStreetMap contributors'
+      attribution: '&copy; OpenStreetMap contributors &bull; Ghana Maritime Authority'
     }).addTo(map);
 
     const vesselMarkers = {};
-    const sarLayers = {};
+    const sarMarkers = {};
     const logBox = document.getElementById('eventLog');
 
     function logEvent(text, typeClass) {
@@ -866,122 +978,132 @@ def get_map_dashboard() -> str:
       logBox.prepend(line);
     }
 
-    async function initGhanaMaritime() {
-      // 1. Tema Commercial Deepwater Anchorage
-      await fetch('/v1/geofences/radial', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          geofence_id: 'tema-commercial-anchorage',
-          name: 'Tema Port Deepwater Anchorage',
-          lat: 5.6200,
-          lon: 0.0500,
-          radius_m: 6500
-        })
-      });
+    function zoomSector(sec) {
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
 
-      L.circle([5.6200, 0.0500], {
-        color: '#38bdf8',
-        fillColor: '#0284c7',
-        fillOpacity: 0.15,
-        radius: 6500
-      }).addTo(map).bindPopup('<b>Tema Deepwater Anchorage</b><br>Crude Tankers & Container Roadstead');
+      if (sec === 'ALL') map.flyTo([5.30, -0.85], 8);
+      else if (sec === 'WESTERN') map.flyTo([4.85, -2.00], 10);
+      else if (sec === 'CENTRAL') map.flyTo([5.18, -1.15], 10);
+      else if (sec === 'ACCRA') map.flyTo([5.62, 0.05], 10);
+      else if (sec === 'VOLTA') map.flyTo([5.92, 0.98], 10);
+    }
 
-      // 2. Keta Artisanal Fishing Grounds
-      const ketaVerts = [
-        {"lat": 5.8200, "lon": 0.8800},
-        {"lat": 5.9500, "lon": 0.9800},
-        {"lat": 5.9200, "lon": 1.1500},
-        {"lat": 5.7600, "lon": 1.0500}
+    async function initNationalGhanaBoundaries() {
+      // 1. Statutory Ghana 6NM Inshore Exclusion Zone (IEZ) Polygon - Full 550km Coastline
+      const fullIEZ = [
+        {"lat": 5.12, "lon": -3.10}, // Half Assini (Ivory Coast border)
+        {"lat": 4.87, "lon": -2.25}, // Axim
+        {"lat": 4.73, "lon": -2.09}, // Cape Three Points
+        {"lat": 4.88, "lon": -1.74}, // Takoradi
+        {"lat": 5.08, "lon": -1.35}, // Elmina
+        {"lat": 5.10, "lon": -1.24}, // Cape Coast
+        {"lat": 5.35, "lon": -0.62}, // Winneba
+        {"lat": 5.53, "lon": -0.21}, // Jamestown
+        {"lat": 5.62, "lon": 0.01},  // Tema
+        {"lat": 5.78, "lon": 0.63},  // Ada Foah
+        {"lat": 5.80, "lon": 0.90},  // Cape St. Paul
+        {"lat": 5.92, "lon": 0.99},  // Keta
+        {"lat": 6.11, "lon": 1.20},  // Aflao (Togo border)
+        // 6NM Seaward Offset Strip
+        {"lat": 6.00, "lon": 1.25},
+        {"lat": 5.70, "lon": 1.05},
+        {"lat": 5.58, "lon": 0.65},
+        {"lat": 5.45, "lon": 0.01},
+        {"lat": 5.38, "lon": -0.21},
+        {"lat": 5.20, "lon": -0.62},
+        {"lat": 4.95, "lon": -1.24},
+        {"lat": 4.75, "lon": -1.74},
+        {"lat": 4.58, "lon": -2.09},
+        {"lat": 4.70, "lon": -2.25},
+        {"lat": 4.98, "lon": -3.10}
       ];
-      await fetch('/v1/geofences/polygon', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          geofence_id: 'keta-artisanal-grounds',
-          name: 'Keta Artisanal Fishing Grounds',
-          vertices: ketaVerts
-        })
-      });
 
-      L.polygon([[5.8200, 0.8800], [5.9500, 0.9800], [5.9200, 1.1500], [5.7600, 1.0500]], {
-        color: '#10b981',
-        fillColor: '#059669',
-        fillOpacity: 0.18,
-        weight: 2
-      }).addTo(map).bindPopup('<b>Keta Artisanal Grounds</b><br>Cape St. Paul to Dzelukope Canoe Fishery');
-
-      // 3. Ghana 6NM Inshore Exclusion Zone (IEZ)
-      const iezVerts = [
-        {"lat": 5.7000, "lon": 0.0500},
-        {"lat": 5.7600, "lon": 0.6300},
-        {"lat": 5.7800, "lon": 0.9000},
-        {"lat": 5.9200, "lon": 1.0500},
-        {"lat": 6.1000, "lon": 1.2000},
-        {"lat": 6.0000, "lon": 1.3000},
-        {"lat": 5.7000, "lon": 1.1200},
-        {"lat": 5.6000, "lon": 0.6500},
-        {"lat": 5.5500, "lon": 0.1000}
-      ];
-      await fetch('/v1/geofences/polygon', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          geofence_id: 'ghana-iez-reserve',
-          name: 'Ghana 6NM Inshore Exclusion Zone (IEZ)',
-          vertices: iezVerts
-        })
-      });
-
-      L.polygon(iezVerts.map(v => [v.lat, v.lon]), {
+      L.polygon(fullIEZ.map(v => [v.lat, v.lon]), {
         color: '#f59e0b',
         fillColor: '#d97706',
         fillOpacity: 0.08,
-        weight: 1.5,
-        dashArray: '6, 6'
-      }).addTo(map).bindPopup('<b>Ghana Inshore Exclusion Zone (IEZ)</b><br>6 Nautical Mile Artisanal Reserve (Fisheries Act 625)');
+        weight: 1.8,
+        dashArray: '5, 5'
+      }).addTo(map).bindPopup('<b>Ghana Inshore Exclusion Zone (IEZ)</b><br>Statutory 6NM Artisanal Reserve (Fisheries Act 625)');
 
-      // Togo Border Line Marker
-      L.polyline([[6.1000, 1.2000], [5.5500, 1.2000]], {
-        color: '#ef4444',
-        weight: 2,
-        dashArray: '4, 4'
-      }).addTo(map).bindPopup('<b>Ghana - Togo Maritime Boundary</b>');
+      // 2. Commercial Anchorages: Tema & Takoradi
+      L.circle([5.6200, 0.0500], { color: '#38bdf8', fillColor: '#0284c7', fillOpacity: 0.15, radius: 6500 }).addTo(map).bindPopup('<b>Tema Deepwater Roadstead</b><br>Crude Tankers & Container Anchorage');
+      L.circle([4.8900, -1.7200], { color: '#38bdf8', fillColor: '#0284c7', fillOpacity: 0.15, radius: 6000 }).addTo(map).bindPopup('<b>Takoradi Commercial Anchorage</b><br>Offshore Oil & Bauxite Roadstead');
 
-      document.getElementById('fenceList').innerHTML = `
-        <div><span class="zone-pill" style="background:#0284c7;color:#fff;">ANCHORAGE</span> <b>Tema Deepwater Roadstead</b> (6.5km)</div>
-        <div><span class="zone-pill" style="background:#059669;color:#fff;">ARTISANAL</span> <b>Keta Coastal Fishing Grounds</b></div>
-        <div><span class="zone-pill" style="background:#d97706;color:#fff;">IEZ</span> <b>Ghana 6NM Exclusion Strip</b> (Act 625)</div>
-        <div><span class="zone-pill" style="background:#ef4444;color:#fff;">BORDER</span> <b>Ghana - Togo Maritime Line (Aflao)</b></div>
-      `;
-      await refreshSubscribers();
+      // 3. International Maritime Borders
+      L.polyline([[5.30, -3.10], [4.50, -3.10]], { color: '#ef4444', weight: 2, dashArray: '4, 4' }).addTo(map).bindPopup('<b>Ghana - Côte d\'Ivoire Maritime Border</b>');
+      L.polyline([[6.15, 1.20], [5.30, 1.20]], { color: '#ef4444', weight: 2, dashArray: '4, 4' }).addTo(map).bindPopup('<b>Ghana - Togo Maritime Border</b>');
+
+      // 4. Render All 20+ Coastal Cell Towers
+      try {
+        const tResp = await fetch('/v1/telecom/towers');
+        if (tResp.ok) {
+          const tData = await tResp.json();
+          tData.towers.forEach(t => {
+            L.circleMarker([t.lat, t.lon], {
+              radius: 4,
+              fillColor: '#a855f7',
+              color: '#fff',
+              weight: 1,
+              fillOpacity: 0.9
+            }).addTo(map).bindPopup(`<b>${t.name}</b><br>Tower ID: ${t.tower_id}<br>Sector: ${t.sector_type} (${t.azimuth_deg}°)<br>Region: ${t.region}`);
+          });
+        }
+      } catch (e) {}
+
+      await refreshRoster();
       await refreshSAR();
       await pollRadar();
     }
-    initGhanaMaritime();
+    initNationalGhanaBoundaries();
 
-    async function refreshSubscribers() {
+    async function refreshRoster() {
       try {
         const resp = await fetch('/v1/telecom/subscribers');
         if (resp.ok) {
           const data = await resp.json();
+          document.getElementById('statEnrolled').innerText = data.total_subscribers;
+          document.getElementById('rosterCount').innerText = `${data.total_subscribers} boats`;
+
+          let atSea = 0;
+          let onShore = 0;
+          let sosCount = 0;
+
+          if (data.subscribers.length === 0) {
+            document.getElementById('fleetTable').innerHTML = '<div style="color:#64748b;padding:4px 0;">No artisanal canoes enrolled yet. Enter canoe details above to enroll.</div>';
+            document.getElementById('statAtSea').innerText = '0';
+            document.getElementById('statOnShore').innerText = '0';
+            document.getElementById('statSOS').innerText = '0';
+            return;
+          }
+
           const rows = data.subscribers.map(s => {
             const isSea = s.status === 'AT_SEA';
-            const badgeColor = isSea ? '#0284c7' : '#10b981';
+            const isSOS = s.status === 'SOS_DISTRESS' || s.status === 'OVERDUE';
+            if (isSea) atSea++;
+            else if (isSOS) sosCount++;
+            else onShore++;
+
+            const badgeColor = isSOS ? '#dc2626' : (isSea ? '#0284c7' : '#10b981');
             return `
-              <div style="border-bottom:1px solid #334155;padding:4px 0;display:flex;justify-content:space-between;align-items:center;">
+              <div style="border-bottom:1px solid #1e293b;padding:5px 0;display:flex;justify-content:space-between;align-items:center;">
                 <div>
-                  <strong>${s.canoe_name}</strong> <span style="color:#94a3b8;font-size:0.7rem;">(${s.phone_number})</span><br>
-                  <span style="color:#64748b;font-size:0.68rem;">${s.landing_beach} &bull; ${s.language}</span>
+                  <strong style="color:#f8fafc;">${s.canoe_name}</strong> <span style="color:#94a3b8;font-size:0.68rem;">(${s.phone_number})</span><br>
+                  <span style="color:#64748b;font-size:0.66rem;">${s.landing_beach} &bull; ${s.language}</span>
                 </div>
                 <div style="text-align:right;">
-                  <span style="background:${badgeColor};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.65rem;font-weight:700;">${s.status}</span>
-                  ${isSea ? `<div style="font-size:0.65rem;color:#38bdf8;margin-top:2px;">${s.distance_offshore_km} km out</div>` : ''}
+                  <span style="background:${badgeColor};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.65rem;font-weight:700;">${s.status}</span>
+                  <button class="btn btn-sm" style="background:#475569;margin-left:4px;padding:1px 5px;" onclick="unenrollCanoe('${s.phone_number}')">🗑️</button>
                 </div>
               </div>
             `;
           }).join('');
-          document.getElementById('subscribersList').innerHTML = rows || '<div style="color:#64748b;">No fishermen enrolled yet.</div>';
+
+          document.getElementById('fleetTable').innerHTML = rows;
+          document.getElementById('statAtSea').innerText = atSea;
+          document.getElementById('statOnShore').innerText = onShore;
+          document.getElementById('statSOS').innerText = sosCount;
         }
       } catch (e) {}
     }
@@ -992,20 +1114,20 @@ def get_map_dashboard() -> str:
         if (resp.ok) {
           const data = await resp.json();
           if (data.incidents.length === 0) {
-            document.getElementById('sarList').innerHTML = '<div style="color:#64748b;">No active SAR incidents.</div>';
+            document.getElementById('activeSARBox').innerHTML = '<div style="color:#64748b;">No active missing boat incidents. Coast is clear.</div>';
             return;
           }
+
           const html = data.incidents.map(inc => {
-            // Render Datum on map
             const datum = inc.projected_datum;
-            if (!sarLayers[inc.incident_id]) {
+            if (!sarMarkers[inc.incident_id]) {
               const marker = L.circleMarker([datum.lat, datum.lon], {
-                radius: 8,
+                radius: 9,
                 fillColor: '#dc2626',
                 color: '#fff',
                 weight: 2,
                 fillOpacity: 0.95
-              }).addTo(map).bindPopup(`<b>SAR DATUM: ${inc.canoe_name}</b><br>Drifted ${inc.drift_distance_nm} NM Eastward<br>Search Radius: ${inc.search_radius_nm} NM`);
+              }).addTo(map).bindPopup(`<b>MISSING CANOE: ${inc.canoe_name}</b><br>Owner: ${inc.phone_number}<br>Beach: ${inc.landing_beach}<br><b>Guinea Current Datum: [${datum.lat.toFixed(4)}, ${datum.lon.toFixed(4)}]</b><br>Drifted ${inc.drift_distance_nm} NM Eastward<br>Search Radius: ${inc.search_radius_nm} NM`);
 
               const circle = L.circle([datum.lat, datum.lon], {
                 radius: inc.search_radius_nm * 1852,
@@ -1015,17 +1137,20 @@ def get_map_dashboard() -> str:
                 dashArray: '5, 5'
               }).addTo(map);
 
-              sarLayers[inc.incident_id] = { marker, circle };
+              sarMarkers[inc.incident_id] = { marker, circle };
             }
 
             return `
-              <div style="border-bottom:1px solid #334155;padding:4px 0;">
-                <strong style="color:#f87171;">${inc.canoe_name}</strong> <span style="font-size:0.68rem;color:#94a3b8;">(${inc.landing_beach})</span><br>
-                <span style="font-size:0.68rem;color:#fbbf24;">Datum: [${datum.lat.toFixed(4)}, ${datum.lon.toFixed(4)}] &bull; ${inc.drift_distance_nm} NM adrift</span>
+              <div style="border-bottom:1px solid #334155;padding:4px 0;display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <strong style="color:#f87171;">🚨 ${inc.canoe_name}</strong> <span style="font-size:0.68rem;color:#94a3b8;">(${inc.landing_beach})</span><br>
+                  <span style="font-size:0.66rem;color:#fbbf24;">Datum: [${datum.lat.toFixed(3)}, ${datum.lon.toFixed(3)}] &bull; ${inc.drift_distance_nm} NM adrift</span>
+                </div>
+                <button class="btn btn-sm" style="background:#059669;padding:2px 6px;" onclick="resolveSAR('${inc.incident_id}')">Found</button>
               </div>
             `;
           }).join('');
-          document.getElementById('sarList').innerHTML = html;
+          document.getElementById('activeSARBox').innerHTML = html;
         }
       } catch (e) {}
     }
@@ -1056,18 +1181,17 @@ def get_map_dashboard() -> str:
       } catch (e) {}
     }
 
-    // Live continuous polling of server state (zero client-side synthetic simulations)
-    setInterval(pollRadar, 2500);
-    setInterval(refreshSubscribers, 5000);
+    setInterval(pollRadar, 3000);
+    setInterval(refreshRoster, 5000);
     setInterval(refreshSAR, 6000);
 
-    async function registerFisherman() {
-      const phone = document.getElementById('subPhone').value.trim();
-      const canoe = document.getElementById('subCanoe').value.trim();
-      const beach = document.getElementById('subBeach').value;
-      const lang = document.getElementById('subLang').value;
+    async function enrollCanoe() {
+      const phone = document.getElementById('regPhone').value.trim();
+      const canoe = document.getElementById('regCanoe').value.trim();
+      const beach = document.getElementById('regBeach').value;
+      const lang = document.getElementById('regLang').value;
       if (!phone || !canoe) {
-        alert('Please enter both phone number and canoe name.');
+        alert('Please enter both mobile number and canoe name.');
         return;
       }
       const resp = await fetch('/v1/telecom/register', {
@@ -1076,87 +1200,114 @@ def get_map_dashboard() -> str:
         body: JSON.stringify({ phone_number: phone, canoe_name: canoe, landing_beach: beach, language: lang })
       });
       if (resp.ok) {
-        logEvent(`[LIFETIME SUBSCRIBER] Enrolled ${canoe} (${phone}) at ${beach}. Zero daily dials required.`, 'event-enter');
-        document.getElementById('subPhone').value = '';
-        document.getElementById('subCanoe').value = '';
-        await refreshSubscribers();
+        logEvent(`[ENROLLMENT SUCCESS] Registered ${canoe} (${phone}) at ${beach}. Zero daily dials required.`, 'event-enter');
+        document.getElementById('regPhone').value = '';
+        document.getElementById('regCanoe').value = '';
+        await refreshRoster();
       }
     }
 
-    async function testCarrierWebhook() {
-      logEvent('[CARRIER WEBHOOK] Receiving incoming signaling event from MTN Ghana...', 'event-info');
-      const resp = await fetch('/v1/telecom/carrier-webhook', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          phone_number: '+233241234501',
-          tower_id: 'TOWER_KETA_SEAWARD',
-          timing_advance: 14,
-          signal_dbm: -80
-        })
-      });
-      const data = await resp.json();
-      logEvent(`[PASSIVE TRIPWIRE] ${data.canoe_name} detected AT_SEA (${data.distance_offshore_km} km out) via Cape St. Paul TA=14.`, 'event-enter');
-      await refreshSubscribers();
-      await pollRadar();
+    async function unenrollCanoe(phone) {
+      if (confirm(`Remove canoe with phone ${phone}?`)) {
+        await fetch(`/v1/telecom/subscribers/${phone}`, { method: 'DELETE' });
+        logEvent(`[UNENROLLED] Removed subscriber ${phone}.`, 'event-info');
+        await refreshRoster();
+      }
     }
 
-    async function injectAISBurst() {
-      logEvent('[AIS INGESTION] Processing raw NMEA 0183 !AIVDM radio burst from Tema Port VHF antenna...', 'event-info');
-      const sampleSentence = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
-      const resp = await fetch('/v1/ais/nmea', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ raw_nmea: sampleSentence })
-      });
-      const data = await resp.json();
-      logEvent(`[AIS DECODED] MMSI ${data.mmsi} (Speed: ${data.speed_knots}kt, Heading: ${data.heading_deg}°). Vessel mapped on radar.`, 'event-info');
-      await pollRadar();
-    }
+    async function reportMissingBoat() {
+      const query = document.getElementById('sarInput').value.trim();
+      if (!query) {
+        alert('Enter a phone number or canoe name to report missing.');
+        return;
+      }
+      // Check if phone or match name
+      const subsResp = await fetch('/v1/telecom/subscribers');
+      const subsData = await subsResp.json();
+      let match = subsData.subscribers.find(s => s.phone_number.includes(query) || s.canoe_name.toLowerCase().includes(query.toLowerCase()));
+      const targetPhone = match ? match.phone_number : query;
 
-    async function testVoiceRobocall() {
-      logEvent('[TELEPHONY] Dispatching automated emergency voice call in Ewe to +233241234501...', 'event-cpa');
-      const resp = await fetch('/v1/telecom/alert/voice', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          phone_number: '+233241234501',
-          cpa_nm: 0.65,
-          tcpa_min: 7.2
-        })
-      });
-      const data = await resp.json();
-      logEvent(`📞 [CALL CONNECTED - ${data.provider}]: Audio message in ${data.language}: "${data.audio_message}"`, 'event-cpa');
-    }
-
-    async function declareEmergencySAR() {
-      logEvent('[SAR DECLARATION] Declaring emergency search & rescue for Keta canoe past return window...', 'event-sar');
+      logEvent(`[SAR REPORTED] Declaring emergency search & rescue for ${query}...`, 'event-sar');
       const resp = await fetch('/v1/sar/declare', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          phone_number: '+233241234501',
-          reason: 'OUTBOARD_MOTOR_FAILURE_DRIFT',
-          hours_adrift: 5.5
-        })
+        body: JSON.stringify({ phone_number: targetPhone, reason: 'FAMILY_REPORTED_OVERDUE_AT_SEA', hours_adrift: 6.0 })
       });
-      const data = await resp.json();
-      logEvent(`🚨 [SAR DOCKET CREATED - ${data.incident_id}]: Guinea Current Datum: [${data.projected_datum.lat}, ${data.projected_datum.lon}], Search Radius: ${data.search_radius_nm} NM. Ghana Navy alerted!`, 'event-sar');
-      await refreshSAR();
+      if (resp.ok) {
+        const data = await resp.json();
+        logEvent(`🚨 [SAR DOCKET CREATED]: Datum [${data.projected_datum.lat}, ${data.projected_datum.lon}]. Guinea Current carried canoe ${data.drift_distance_nm} NM east. Ghana Navy notified!`, 'event-sar');
+        document.getElementById('sarInput').value = '';
+        await refreshSAR();
+        await refreshRoster();
+      } else {
+        alert('Could not find registered boat with that number. Please ensure the canoe is registered.');
+      }
     }
 
-    async function clearRadarEntities() {
+    async function resolveSAR(incId) {
+      await fetch(`/v1/sar/resolve/${incId}`, { method: 'POST' });
+      if (sarMarkers[incId]) {
+        map.removeLayer(sarMarkers[incId].marker);
+        map.removeLayer(sarMarkers[incId].circle);
+        delete sarMarkers[incId];
+      }
+      logEvent(`[SAR RESOLVED] Incident ${incId} marked safely recovered.`, 'event-enter');
+      await refreshSAR();
+      await refreshRoster();
+    }
+
+    async function simulateKeypadSOS() {
+      const subsResp = await fetch('/v1/telecom/subscribers');
+      const subsData = await subsResp.json();
+      const phone = subsData.subscribers.length > 0 ? subsData.subscribers[0].phone_number : '+233244111222';
+      logEvent(`[KEYPAD MAYDAY] Incoming USSD/SMS SOS from ${phone}...`, 'event-cpa');
+      const resp = await fetch('/v1/telecom/sos', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ phone_number: phone, message: 'MAYDAY_ENGINE_DEAD_SURF_HIGH' })
+      });
+      const data = await resp.json();
+      logEvent(`🚨 [EMERGENCY MAYDAY ACTIVATED]: ${data.canoe_name} triggered SOS! Navy rescue docket created.`, 'event-cpa');
+      await refreshSAR();
+      await refreshRoster();
+    }
+
+    async function simulateSeawardTrip() {
+      const subsResp = await fetch('/v1/telecom/subscribers');
+      const subsData = await subsResp.json();
+      const phone = subsData.subscribers.length > 0 ? subsData.subscribers[0].phone_number : '+233244111222';
+      logEvent(`[PASSIVE TRIPWIRE] Canoe ${phone} handover to Seaward Tower (TA=12)...`, 'event-info');
+      const resp = await fetch('/v1/telecom/cell-event', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ phone_number: phone, tower_id: 'TOWER_KETA_SEAWARD', timing_advance: 12 })
+      });
+      const data = await resp.json();
+      logEvent(`[AUTO SEA LAUNCH] ${data.canoe_name} marked AT_SEA (${data.distance_offshore_km} km out) without touching phone!`, 'event-enter');
+      await refreshRoster();
+      await pollRadar();
+    }
+
+    async function injectAISVessel() {
+      logEvent('[AIS INGESTION] Ingesting Class-A crude tanker NMEA radio sentence...', 'event-info');
+      const sample = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
+      const resp = await fetch('/v1/ais/nmea', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ raw_nmea: sample })
+      });
+      const data = await resp.json();
+      logEvent(`[AIS TANKER MAPPED] MMSI ${data.mmsi} Speed: ${data.speed_knots}kt Heading: ${data.heading_deg}°`, 'event-info');
+      await pollRadar();
+    }
+
+    async function clearRadar() {
       await fetch('/v1/fleet/clear', { method: 'POST' });
       for (const id in vesselMarkers) {
         map.removeLayer(vesselMarkers[id]);
         delete vesselMarkers[id];
       }
-      for (const id in sarLayers) {
-        map.removeLayer(sarLayers[id].marker);
-        map.removeLayer(sarLayers[id].circle);
-        delete sarLayers[id];
-      }
-      logEvent('[RADAR CLEARED] Transient vessels and SAR markers reset.', 'event-info');
+      logEvent('[RADAR RESET] Test vessels cleared from active display.', 'event-info');
     }
   </script>
 </body>

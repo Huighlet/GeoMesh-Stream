@@ -248,3 +248,49 @@ def test_weather_broadcast_endpoint(client):
     data = resp.json()
     assert data["hazard"] == "SWELL_WARNING"
     assert "total_canoes_notified" in data
+
+
+def test_keypad_phone_sos_emergency(client):
+    # 1. Register canoe
+    client.post("/v1/telecom/register", json={
+        "phone_number": "+233249119900",
+        "canoe_name": "Ahomka",
+        "landing_beach": "Elmina",
+        "language": "FANTE",
+    })
+
+    # 2. Keypad sends SMS 'SOS' or dials *920*44#
+    sos_resp = client.post("/v1/telecom/sos", json={
+        "phone_number": "+233249119900",
+        "message": "MAYDAY_ENGINE_FAILURE_AT_SEA",
+    })
+    assert sos_resp.status_code == 200
+    data = sos_resp.json()
+    assert data["status"] == "SOS_DISTRESS_ACTIVATED"
+    assert "sar_incident_id" in data
+    assert "projected_datum" in data
+
+
+def test_unenroll_canoe_endpoint(client):
+    # Register then delete
+    client.post("/v1/telecom/register", json={
+        "phone_number": "+233240009999",
+        "canoe_name": "To Delete",
+        "landing_beach": "Axim",
+        "language": "NZEMA",
+    })
+    del_resp = client.delete("/v1/telecom/subscribers/+233240009999")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["deleted"] is True
+
+
+def test_national_coastal_towers(client):
+    resp = client.get("/v1/telecom/towers")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_towers"] >= 20
+    regions = {t["region"] for t in data["towers"]}
+    assert "Western" in regions
+    assert "Central" in regions
+    assert "Greater Accra" in regions
+    assert "Volta" in regions

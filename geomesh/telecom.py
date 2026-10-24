@@ -29,14 +29,17 @@ class Language(enum.StrEnum):
     EWE = "EWE"
     GA = "GA"
     FANTE = "FANTE"
+    DANGME = "DANGME"
+    NZEMA = "NZEMA"
     ENGLISH = "ENGLISH"
 
 
 class VesselStatus(enum.StrEnum):
     ON_SHORE = "ON_SHORE"
     AT_SEA = "AT_SEA"
-    ADRIFT_WARNING = "ADRIFT_WARNING"
     OVERDUE = "OVERDUE"
+    SOS_DISTRESS = "SOS_DISTRESS"
+    ADRIFT_WARNING = "ADRIFT_WARNING"
 
 
 @dataclasses.dataclass(slots=True)
@@ -49,6 +52,7 @@ class TowerSector:
     sector_type: str  # "INLAND" or "SEAWARD"
     azimuth_deg: float  # Direction antenna is pointing
     beamwidth_deg: float = 120.0
+    region: str = "GHANA"
 
     def calculate_position(self, timing_advance: int) -> Point:
         """
@@ -98,6 +102,14 @@ class MaritimeVoiceAlertService:
         Language.FANTE: (
             "Nuakor, hyɛn kɛse bi reba hom do wɔ po no mu. "
             "Hom ntwe hom asau anaa hom nsɔ kanea ntɛm ara!"
+        ),
+        Language.DANGME: (
+            "Nyɛmimɛi, lɔle gba ko mi ba nyɛ he yɛ wo ɔ nɔ. "
+            "Nyɛ gbla nyɛ yaa a nɛ nyɛ tso kane amlɔ nɛ!"
+        ),
+        Language.NZEMA: (
+            "Medebere, melɛ kpole bie ɛlɛba bɛ nwo lɔ wɔ azule ne anu. "
+            "Bɛhwe bɛ asau na bɛsɔ kanea ɛkɛ ne ala!"
         ),
         Language.ENGLISH: (
             "Urgent Marine Warning: A large commercial vessel is bearing down on your sector. "
@@ -207,64 +219,42 @@ class TelecomPassiveGateway:
         self._load_from_storage()
 
     def _init_default_coastal_towers(self) -> None:
-        """Initialize standard coastal cell towers along Keta, Ada, Prampram, and Tema."""
+        """Initialize coastal cell towers spanning the entire 550km coastline of Ghana."""
         towers = [
-            TowerSector(
-                tower_id="TOWER_KETA_SEAWARD",
-                name="Keta Cape St. Paul Seaward Sector",
-                lat=5.8000,
-                lon=0.9000,
-                sector_type="SEAWARD",
-                azimuth_deg=165.0,
-            ),
-            TowerSector(
-                tower_id="TOWER_KETA_INLAND",
-                name="Keta Town Inland Sector",
-                lat=5.9200,
-                lon=0.9900,
-                sector_type="INLAND",
-                azimuth_deg=340.0,
-            ),
-            TowerSector(
-                tower_id="TOWER_DZELUKOPE_SEAWARD",
-                name="Dzelukope Coastal Seaward Sector",
-                lat=5.8900,
-                lon=0.9800,
-                sector_type="SEAWARD",
-                azimuth_deg=150.0,
-            ),
-            TowerSector(
-                tower_id="TOWER_ADA_FOAH_SEAWARD",
-                name="Ada Volta Estuary Seaward Sector",
-                lat=5.7800,
-                lon=0.6300,
-                sector_type="SEAWARD",
-                azimuth_deg=175.0,
-            ),
-            TowerSector(
-                tower_id="TOWER_TEMA_SEAWARD",
-                name="Tema Port Offshore Sector",
-                lat=5.6200,
-                lon=0.0100,
-                sector_type="SEAWARD",
-                azimuth_deg=180.0,
-            ),
-            TowerSector(
-                tower_id="TOWER_JAMESTOWN_SEAWARD",
-                name="Jamestown Accra Lighthouse Seaward Sector",
-                lat=5.5300,
-                lon=-0.2100,
-                sector_type="SEAWARD",
-                azimuth_deg=185.0,
-            ),
-            TowerSector(
-                tower_id="TOWER_ELMINA_SEAWARD",
-                name="Elmina Fishing Harbor Seaward Sector",
-                lat=5.0800,
-                lon=-1.3500,
-                sector_type="SEAWARD",
-                azimuth_deg=175.0,
-            ),
+            # 1. Volta Region (Togo Border to Volta River)
+            TowerSector(tower_id="TOWER_AFLAO_SEAWARD", name="Aflao Togo Border Sector", lat=6.1100, lon=1.2000, sector_type="SEAWARD", azimuth_deg=160.0, region="Volta"),
+            TowerSector(tower_id="TOWER_KETA_SEAWARD", name="Keta Cape St. Paul Seaward Sector", lat=5.8000, lon=0.9000, sector_type="SEAWARD", azimuth_deg=165.0, region="Volta"),
+            TowerSector(tower_id="TOWER_KETA_INLAND", name="Keta Town Inland Sector", lat=5.9200, lon=0.9900, sector_type="INLAND", azimuth_deg=340.0, region="Volta"),
+            TowerSector(tower_id="TOWER_DZELUKOPE_SEAWARD", name="Dzelukope Coastal Seaward Sector", lat=5.8900, lon=0.9800, sector_type="SEAWARD", azimuth_deg=150.0, region="Volta"),
+            TowerSector(tower_id="TOWER_ANLOGA_SEAWARD", name="Anloga Coastal Sector", lat=5.7900, lon=0.9000, sector_type="SEAWARD", azimuth_deg=170.0, region="Volta"),
+            TowerSector(tower_id="TOWER_ANYANUI_SEAWARD", name="Anyanui Estuary Sector", lat=5.8000, lon=0.7500, sector_type="SEAWARD", azimuth_deg=175.0, region="Volta"),
+
+            # 2. Greater Accra Region (Ada Foah to Kokrobite)
+            TowerSector(tower_id="TOWER_ADA_FOAH_SEAWARD", name="Ada Volta Estuary Seaward Sector", lat=5.7800, lon=0.6300, sector_type="SEAWARD", azimuth_deg=175.0, region="Greater Accra"),
+            TowerSector(tower_id="TOWER_OLD_NINGO_SEAWARD", name="Old Ningo Coastal Sector", lat=5.7500, lon=0.1800, sector_type="SEAWARD", azimuth_deg=180.0, region="Greater Accra"),
+            TowerSector(tower_id="TOWER_PRAMPRAM_SEAWARD", name="Prampram Coastal Sector", lat=5.7100, lon=0.1200, sector_type="SEAWARD", azimuth_deg=180.0, region="Greater Accra"),
+            TowerSector(tower_id="TOWER_TEMA_SEAWARD", name="Tema Port Deepwater Offshore Sector", lat=5.6200, lon=0.0100, sector_type="SEAWARD", azimuth_deg=180.0, region="Greater Accra"),
+            TowerSector(tower_id="TOWER_TESHIE_SEAWARD", name="Teshie-Nungua Coastal Sector", lat=5.5800, lon=-0.0900, sector_type="SEAWARD", azimuth_deg=185.0, region="Greater Accra"),
+            TowerSector(tower_id="TOWER_JAMESTOWN_SEAWARD", name="Jamestown Accra Lighthouse Seaward Sector", lat=5.5300, lon=-0.2100, sector_type="SEAWARD", azimuth_deg=185.0, region="Greater Accra"),
+            TowerSector(tower_id="TOWER_KOKROBITE_SEAWARD", name="Kokrobite Fishery Sector", lat=5.4900, lon=-0.3700, sector_type="SEAWARD", azimuth_deg=180.0, region="Greater Accra"),
+
+            # 3. Central Region (Senya Beraku to Komenda)
+            TowerSector(tower_id="TOWER_SENYA_BERAKU_SEAWARD", name="Senya Beraku Coastal Sector", lat=5.3900, lon=-0.5000, sector_type="SEAWARD", azimuth_deg=180.0, region="Central"),
+            TowerSector(tower_id="TOWER_WINNEBA_SEAWARD", name="Winneba Coastal Sector", lat=5.3500, lon=-0.6200, sector_type="SEAWARD", azimuth_deg=180.0, region="Central"),
+            TowerSector(tower_id="TOWER_APAM_SEAWARD", name="Apam Bay Fishery Sector", lat=5.2800, lon=-0.7300, sector_type="SEAWARD", azimuth_deg=180.0, region="Central"),
+            TowerSector(tower_id="TOWER_SALTPOND_SEAWARD", name="Saltpond Coastal Sector", lat=5.2000, lon=-1.0600, sector_type="SEAWARD", azimuth_deg=180.0, region="Central"),
+            TowerSector(tower_id="TOWER_CAPECOAST_SEAWARD", name="Cape Coast Castle Sector", lat=5.1000, lon=-1.2400, sector_type="SEAWARD", azimuth_deg=180.0, region="Central"),
+            TowerSector(tower_id="TOWER_ELMINA_SEAWARD", name="Elmina Fishing Harbor Seaward Sector", lat=5.0800, lon=-1.3500, sector_type="SEAWARD", azimuth_deg=175.0, region="Central"),
+            TowerSector(tower_id="TOWER_KOMENDA_SEAWARD", name="Komenda Seaward Sector", lat=5.0500, lon=-1.4800, sector_type="SEAWARD", azimuth_deg=175.0, region="Central"),
+
+            # 4. Western Region (Shama to Ivory Coast Border)
+            TowerSector(tower_id="TOWER_SHAMA_SEAWARD", name="Shama Pra Estuary Sector", lat=5.0100, lon=-1.6300, sector_type="SEAWARD", azimuth_deg=175.0, region="Western"),
+            TowerSector(tower_id="TOWER_SEKONDI_SEAWARD", name="Sekondi Naval Base Sector", lat=4.9400, lon=-1.7100, sector_type="SEAWARD", azimuth_deg=175.0, region="Western"),
+            TowerSector(tower_id="TOWER_TAKORADI_SEAWARD", name="Takoradi Port Seaward Sector", lat=4.8900, lon=-1.7400, sector_type="SEAWARD", azimuth_deg=175.0, region="Western"),
+            TowerSector(tower_id="TOWER_DIXCOVE_SEAWARD", name="Dixcove Coastal Sector", lat=4.8000, lon=-1.9500, sector_type="SEAWARD", azimuth_deg=175.0, region="Western"),
+            TowerSector(tower_id="TOWER_CAPETHREEPOINTS_SEAWARD", name="Cape Three Points Seaward Sector", lat=4.7400, lon=-2.0900, sector_type="SEAWARD", azimuth_deg=180.0, region="Western"),
+            TowerSector(tower_id="TOWER_AXIM_SEAWARD", name="Axim Fishery Sector", lat=4.8700, lon=-2.2400, sector_type="SEAWARD", azimuth_deg=180.0, region="Western"),
+            TowerSector(tower_id="TOWER_HALFASSINI_SEAWARD", name="Half Assini Ivory Coast Border Sector", lat=5.1000, lon=-3.1000, sector_type="SEAWARD", azimuth_deg=180.0, region="Western"),
         ]
         for t in towers:
             self._towers[t.tower_id] = t
@@ -334,6 +324,60 @@ class TelecomPassiveGateway:
 
     def list_subscribers(self) -> List[CanoeSubscriber]:
         return list(self._subscribers.values())
+
+    def delete_subscriber(self, phone_number: str) -> bool:
+        """Remove a subscriber from memory and durable storage."""
+        clean = phone_number.strip().replace(" ", "")
+        self._subscribers.pop(clean, None)
+        if self.store:
+            return self.store.delete_subscriber(clean)
+        return True
+
+    def trigger_sos(
+        self,
+        phone_number: str,
+        message: str = "SOS_DISTRESS",
+    ) -> Dict[str, Any]:
+        """
+        Ingest emergency SOS distress signal sent from a keypad phone (via SMS or USSD *920*44#).
+        Immediately transitions canoe status to SOS_DISTRESS and updates durable store.
+        """
+        clean_phone = phone_number.strip().replace(" ", "")
+        sub = self.get_subscriber(clean_phone)
+        if not sub:
+            sub = self.register_subscriber(clean_phone, f"Canoe-{clean_phone[-4:]}")
+
+        sub.status = VesselStatus.SOS_DISTRESS
+        now_sec = time.time()
+        sub.last_event_ts_ns = int(now_sec * 1e9)
+
+        if self.store:
+            rec = SubscriberRecord(
+                phone_number=clean_phone,
+                owner_name=sub.owner_name or sub.canoe_name,
+                canoe_name=sub.canoe_name,
+                landing_beach=sub.landing_beach,
+                language=str(sub.language),
+                status=str(sub.status),
+                registered_at=sub.registered_at_ns / 1e9,
+                last_seen_at=now_sec,
+                last_tower_id=sub.last_seen_tower or "",
+                last_timing_advance=sub.last_timing_advance,
+                last_lat=sub.last_point.lat if sub.last_point else 0.0,
+                last_lon=sub.last_point.lon if sub.last_point else 0.0,
+                distance_offshore_km=round((sub.last_timing_advance * 550.0) / 1000.0, 2),
+            )
+            self.store.save_subscriber(rec)
+
+        return {
+            "status": "SOS_DISTRESS_ACTIVATED",
+            "phone_number": clean_phone,
+            "canoe_name": sub.canoe_name,
+            "landing_beach": sub.landing_beach,
+            "last_known_fix": {"lat": sub.last_point.lat, "lon": sub.last_point.lon} if sub.last_point else None,
+            "message": message,
+            "timestamp": now_sec,
+        }
 
     def get_tower(self, tower_id: str) -> Optional[TowerSector]:
         return self._towers.get(tower_id)
