@@ -570,6 +570,59 @@ def list_subscribers() -> Dict[str, Any]:
     }
 
 
+
+@app.get("/v1/telecom/locate/{phone_number}", tags=["Telecom LBS & Artisanal Registry"])
+def locate_canoe_realtime(phone_number: str) -> Dict[str, Any]:
+    """
+    Real-time query to locate an artisanal canoe via GSM network signaling.
+    Answers questions like: 'Someone left Keta and went to Vodza to sell fish, are they missing?'
+    Calculates distance from home landing beach and confirms whether safe on shore or active at sea.
+    """
+    try:
+        return telecom_gateway.locate_subscriber(phone_number)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Artisanal canoe with identifier '{phone_number}' not found in national registry."
+        )
+
+
+@app.post("/v1/telecom/ping/{phone_number}", tags=["Telecom LBS & Artisanal Registry"])
+def ping_canoe_radio(
+    phone_number: str,
+    simulated_tower: Optional[str] = Query(None),
+    timing_advance: int = Query(0),
+) -> Dict[str, Any]:
+    """
+    Trigger active GSM radio paging / HLR probe for an artisanal canoe.
+    Simulates or executes real-time tower handover (e.g. Relocating from Keta to Vodza).
+    """
+    try:
+        loc = telecom_gateway.ping_radio(
+            phone_number=phone_number,
+            simulated_tower=simulated_tower,
+            timing_advance=timing_advance,
+        )
+        if simulated_tower:
+            pos = loc["current_coordinates"]
+            ping = TelemetryPing.create(
+                entity_id=f"canoe-{loc['phone_number']}",
+                lat=pos["lat"],
+                lon=pos["lon"],
+                speed_mps=1.8 if loc["current_status"] == "AT_SEA" else 0.0,
+                heading_deg=140.0,
+                timestamp_ns=time.time_ns(),
+            )
+            engine = get_engine()
+            engine.ingest_telemetry(ping)
+        return loc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Artisanal canoe with identifier '{phone_number}' not found in national registry."
+        )
+
+
 @app.post("/v1/telecom/cell-event", tags=["Telecom LBS & Artisanal Registry"])
 def ingest_cell_event(req: CellEventRequest) -> Dict[str, Any]:
     """
@@ -962,7 +1015,27 @@ def get_map_dashboard() -> str:
           </div>
         </div>
 
-        <!-- 2. ONE-TIME CANOE REGISTRATION -->
+                <!-- REALTIME CANOE TRACKER & KETA-VODZA RESOLVER -->
+        <div class="card" style="border-color:#38bdf8;background:#0d1c2d;">
+          <h3 style="color:#38bdf8;">🛰️ Real-Time Canoe Locator (USSD / Carrier Ping) <span style="font-size:0.65rem;background:#0284c7;color:#fff;padding:2px 6px;border-radius:4px;">ZERO-APP GSM</span></h3>
+          <p style="font-size:0.72rem;color:#cbd5e1;line-height:1.4;margin:4px 0 8px 0;">
+            Check if a canoe is genuinely missing at sea or merely landed at another beach (e.g. <strong>Keta &rarr; Vodza</strong> to sell catch).
+          </p>
+          <div style="display:flex;gap:6px;margin-bottom:8px;">
+            <input id="locateInput" type="text" placeholder="Phone or Canoe Name (e.g. Dzidula)" list="canoeSuggestions" style="flex:1;background:#090d16;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+            <datalist id="canoeSuggestions"></datalist>
+            <button class="btn btn-sm" onclick="locateCanoeRealtime()" style="white-space:nowrap;background:#0284c7;">🔍 LOCATE</button>
+          </div>
+          
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+            <button class="btn btn-sm" style="background:#059669;font-size:0.68rem;" onclick="simulateKetaToVodza()">🚤 Relocate to Vodza (Sell Fish)</button>
+            <button class="btn btn-sm" style="background:#475569;font-size:0.68rem;" onclick="simulateReturnToKeta()">🏖️ Return to Keta Beach</button>
+          </div>
+
+          <div id="locateResultBox" style="font-size:0.72rem;line-height:1.4;background:#07111e;border:1px solid #1e293b;border-radius:4px;padding:8px;display:none;"></div>
+        </div>
+
+<!-- 2. ONE-TIME CANOE REGISTRATION -->
         <div class="card">
           <h3>Enroll Artisanal Canoe (Feature Phone) <span style="font-size:0.65rem;background:#059669;color:#fff;padding:2px 6px;border-radius:4px;">ZERO DAILY DIAL</span></h3>
           <div style="display:flex;flex-direction:column;gap:6px;font-size:0.75rem;">
@@ -971,6 +1044,7 @@ def get_map_dashboard() -> str:
             <div style="display:flex;gap:6px;">
               <select id="regBeach" style="flex:1;background:#090d16;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.74rem;">
                 <option value="Keta Beach">Volta: Keta Beach</option>
+                <option value="Vodza">Volta: Vodza</option>
                 <option value="Dzelukope">Volta: Dzelukope</option>
                 <option value="Anloga">Volta: Anloga</option>
                 <option value="Aflao">Volta: Aflao</option>
@@ -1168,6 +1242,11 @@ def get_map_dashboard() -> str:
         if (resp.ok) {
           const data = await resp.json();
           document.getElementById('statEnrolled').innerText = data.total_subscribers;
+          const datalist = document.getElementById('canoeSuggestions');
+          if (datalist) {
+            datalist.innerHTML = data.subscribers.map(s => `<option value="${s.phone_number}">${s.canoe_name} (${s.landing_beach})</option>`).join('');
+          }
+
           document.getElementById('rosterCount').innerText = `${data.total_subscribers} boats`;
 
           let atSea = 0;
@@ -1201,6 +1280,7 @@ def get_map_dashboard() -> str:
                   ${s.status === 'ON_SHORE' ? `<button class="btn btn-sm" style="background:#0284c7;padding:1px 4px;" title="Simulate Launch" onclick="quickLaunch('${s.phone_number}', '${s.landing_beach}')">🚀</button>` : ''}
                   ${s.status === 'AT_SEA' ? `<button class="btn btn-sm" style="background:#10b981;padding:1px 4px;" title="Return Safe" onclick="quickReturn('${s.phone_number}', '${s.landing_beach}')">🏖️</button>` : ''}
                   ${s.status !== 'SOS_DISTRESS' ? `<button class="btn btn-sm" style="background:#dc2626;padding:1px 4px;" title="Distress SOS" onclick="quickSOS('${s.phone_number}')">🚨</button>` : ''}
+                  <button class="btn btn-sm" style="background:#0891b2;padding:1px 4px;" title="Real-time GSM Locate" onclick="locateSpecific('${s.phone_number}')">🔍</button>
                   <button class="btn btn-sm" style="background:#475569;padding:1px 4px;" title="Unenroll" onclick="unenrollCanoe('${s.phone_number}')">🗑️</button>
                 </div>
               </div>
@@ -1320,6 +1400,127 @@ def get_map_dashboard() -> str:
     setInterval(pollRadar, 3000);
     setInterval(refreshRoster, 5000);
     setInterval(refreshSAR, 6000);
+
+    
+    async function locateCanoeRealtime() {
+      const input = document.getElementById('locateInput').value.trim();
+      if (!input) {
+        alert('Please enter a phone number or canoe name to locate.');
+        return;
+      }
+      try {
+        logEvent(`[GSM PING] Interrogating carrier HLR/VLR for ${input}...`, 'event-info');
+        const resp = await fetch(`/v1/telecom/locate/${encodeURIComponent(input)}`);
+        if (!resp.ok) {
+          alert(`Canoe '${input}' not found in registry.`);
+          return;
+        }
+        const data = await resp.json();
+        const box = document.getElementById('locateResultBox');
+        box.style.display = 'block';
+
+        const isRelocated = data.safety_assessment === 'SAFE_RELOCATED_LANDING';
+        const isSafeHome = data.safety_assessment === 'SAFE_ON_SHORE_HOME';
+        const isSea = data.safety_assessment === 'ACTIVE_AT_SEA';
+        const isSOS = data.safety_assessment === 'SOS_DISTRESS';
+
+        const badgeColor = isSOS ? '#dc2626' : ((isRelocated || isSafeHome) ? '#059669' : '#0284c7');
+        const badgeTitle = isRelocated ? `🟢 SAFE ON SHORE &bull; ${data.nearest_beach.toUpperCase()} (${data.distance_from_home_km}km from ${data.home_beach})` :
+                           (isSafeHome ? `🟢 SAFE ON SHORE &bull; ${data.home_beach.toUpperCase()}` :
+                           (isSea ? `🔵 AT SEA &bull; ${data.distance_offshore_km}km OFFSHORE` : `🔴 EMERGENCY SOS`));
+
+        box.innerHTML = `
+          <div style="background:${badgeColor};color:#fff;padding:4px 8px;border-radius:4px;font-weight:700;font-size:0.73rem;margin-bottom:6px;">
+            ${badgeTitle}
+          </div>
+          <div style="color:#f8fafc;font-weight:600;margin-bottom:3px;">${data.canoe_name} (${data.phone_number})</div>
+          <div style="color:#cbd5e1;margin-bottom:4px;font-size:0.7rem;">${data.display_message_en}</div>
+          <div style="color:#38bdf8;font-style:italic;margin-bottom:6px;font-size:0.68rem;background:#030712;padding:4px;border-radius:3px;border-left:2px solid #38bdf8;">
+            🇬🇭 Mother Tongue: "${data.display_message_local}"
+          </div>
+          <div style="display:flex;justify-content:space-between;color:#94a3b8;font-size:0.66rem;border-top:1px solid #1e293b;padding-top:4px;">
+            <span>Tower: <strong>${data.tower_name}</strong></span>
+            <span>Timing Adv: <strong>TA=${data.timing_advance}</strong> (${data.distance_offshore_km}km)</span>
+            <span>Ping: <strong>${data.ping_latency_ms}ms</strong></span>
+          </div>
+        `;
+
+        // Focus map and draw marker & relocation line if relocated
+        const coords = data.current_coordinates;
+        map.flyTo([coords.lat, coords.lon], 13);
+
+        if (window.locateMarker) map.removeLayer(window.locateMarker);
+        if (window.relocationLine) map.removeLayer(window.relocationLine);
+
+        const markerColor = isSOS ? '#dc2626' : ((isRelocated || isSafeHome) ? '#10b981' : '#38bdf8');
+        window.locateMarker = L.circleMarker([coords.lat, coords.lon], {
+          radius: 10,
+          fillColor: markerColor,
+          color: '#ffffff',
+          weight: 3,
+          fillOpacity: 0.95
+        }).addTo(map).bindPopup(`
+          <strong>${data.canoe_name} (${data.phone_number})</strong><br>
+          Status: <b>${badgeTitle}</b><br>
+          Current Location: ${data.nearest_beach}<br>
+          Home Beach: ${data.home_beach} (${data.distance_from_home_km} km away)<br>
+          Tower: ${data.tower_name}<br>
+          Timing Advance: TA=${data.timing_advance}
+        `).openPopup();
+
+        if (isRelocated) {
+          const homeCoords = [5.9200, 0.9900]; // Keta default
+          window.relocationLine = L.polyline([homeCoords, [coords.lat, coords.lon]], {
+            color: '#10b981',
+            weight: 3,
+            dashArray: '6, 6'
+          }).addTo(map).bindPopup(`<b>Relocation Flight Path</b><br>Launched from ${data.home_beach} &rarr; Landed at ${data.nearest_beach} (${data.distance_from_home_km} km)`);
+        }
+
+        logEvent(`[REALTIME GSM FIX] ${data.canoe_name} (${data.phone_number}) located at ${data.nearest_beach}. ${isRelocated ? 'Safe on shore at another beach - false missing boat alarm avoided!' : 'Tracked successfully.'}`, isRelocated ? 'event-enter' : 'event-info');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function locateSpecific(phone) {
+      document.getElementById('locateInput').value = phone;
+      locateCanoeRealtime();
+    }
+
+    async function simulateKetaToVodza() {
+      const subsResp = await fetch('/v1/telecom/subscribers');
+      const subsData = await subsResp.json();
+      let match = subsData.subscribers.find(s => s.landing_beach.includes('Keta') || s.canoe_name.includes('Dzidula'));
+      const phone = match ? match.phone_number : '+233240003344';
+
+      logEvent(`[SIMULATION] Fisherman with canoe '${match ? match.canoe_name : "Dzidula"}' left Keta and landed at Vodza Beach to sell catch...`, 'event-sar');
+      const resp = await fetch(`/v1/telecom/ping/${encodeURIComponent(phone)}?simulated_tower=TOWER_VODZA_COASTAL&timing_advance=0`, {
+        method: 'POST'
+      });
+      if (resp.ok) {
+        document.getElementById('locateInput').value = phone;
+        await locateCanoeRealtime();
+        await refreshRoster();
+      }
+    }
+
+    async function simulateReturnToKeta() {
+      const subsResp = await fetch('/v1/telecom/subscribers');
+      const subsData = await subsResp.json();
+      let match = subsData.subscribers.find(s => s.landing_beach.includes('Keta') || s.canoe_name.includes('Dzidula'));
+      const phone = match ? match.phone_number : '+233240003344';
+
+      logEvent(`[SIMULATION] Canoe '${match ? match.canoe_name : "Dzidula"}' returns back to home beach at Keta...`, 'event-info');
+      const resp = await fetch(`/v1/telecom/ping/${encodeURIComponent(phone)}?simulated_tower=TOWER_KETA_INLAND&timing_advance=0`, {
+        method: 'POST'
+      });
+      if (resp.ok) {
+        document.getElementById('locateInput').value = phone;
+        await locateCanoeRealtime();
+        await refreshRoster();
+      }
+    }
 
     async function enrollCanoe() {
       const phone = document.getElementById('regPhone').value.trim();
