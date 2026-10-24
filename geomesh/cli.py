@@ -151,6 +151,17 @@ def run_benchmark(iterations: int = 100000) -> None:
     print("=" * 76)
 
 
+def cmd_serve(host: str, port: int) -> None:
+    """Run standalone geospatial telemetry & geofence server."""
+    import uvicorn
+    print("=" * 60)
+    print(f"GeoMesh-Stream Server running on http://{host}:{port}")
+    print(f"Interactive Live Map Dashboard: http://{host}:{port}/")
+    print(f"Interactive Swagger Documentation: http://{host}:{port}/docs")
+    print("=" * 60)
+    uvicorn.run("geomesh.server:app", host=host, port=port, reload=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="geomesh",
@@ -158,11 +169,17 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    serve_parser = subparsers.add_parser("serve", help="Run HTTP & WebSocket Geospatial Server")
+    serve_parser.add_argument("--host", default="0.0.0.0", help="Binding host address")
+    serve_parser.add_argument("--port", type=int, default=8080, help="Binding port")
+
     bench_parser = subparsers.add_parser("bench", help="Run geospatial performance benchmark suite")
     bench_parser.add_argument("-n", "--iterations", type=int, default=100000, help="Number of iterations")
 
     args = parser.parse_args()
-    if args.command == "bench":
+    if args.command == "serve":
+        cmd_serve(args.host, args.port)
+    elif args.command == "bench":
         run_benchmark(iterations=args.iterations)
     else:
         parser.print_help()

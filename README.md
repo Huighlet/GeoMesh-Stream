@@ -2,7 +2,7 @@
 
 **Real-Time Telemetry & Spatial Geofence Stream Engine with Spatial Grid Indexing & Kinematics**
 
-[![Build Status](https://img.shields.io/badge/tests-16%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
+[![Build Status](https://img.shields.io/badge/tests-20%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Zero AI Slop](https://img.shields.io/badge/codebase-zero%20ai%20slop-black.svg)](https://github.com/Huighlet/GeoMesh-Stream)
@@ -170,24 +170,68 @@ pytest -v
 ```
 Output:
 ```
-tests/test_engine.py::test_engine_telemetry_and_alerts PASSED            [  6%]
-tests/test_engine.py::test_engine_query_radius PASSED                    [ 12%]
-tests/test_geofence.py::test_radial_geofence_containment PASSED          [ 18%]
-tests/test_geofence.py::test_polygon_geofence_containment PASSED         [ 25%]
-tests/test_geofence.py::test_geofence_engine_transition_lifecycle PASSED [ 31%]
-tests/test_geofence.py::test_duplicate_geofence_registration PASSED      [ 37%]
-tests/test_index.py::test_spatial_grid_insert_and_query PASSED           [ 43%]
-tests/test_index.py::test_spatial_grid_remove PASSED                     [ 50%]
-tests/test_index.py::test_spatial_grid_radius_query PASSED               [ 56%]
-tests/test_kinematics.py::test_kinematic_velocity_and_bearing PASSED     [ 62%]
-tests/test_kinematics.py::test_dead_reckoning_prediction PASSED          [ 68%]
-tests/test_math.py::test_haversine_known_distances PASSED                [ 75%]
-tests/test_math.py::test_initial_bearing PASSED                          [ 81%]
-tests/test_math.py::test_dead_reckoning_destination PASSED               [ 87%]
-tests/test_math.py::test_point_in_polygon_convex PASSED                  [ 93%]
-tests/test_math.py::test_point_in_polygon_concave PASSED                 [100%]
+tests/test_engine.py::test_engine_telemetry_and_alerts PASSED            [  5%]
+tests/test_engine.py::test_engine_query_radius PASSED                    [ 10%]
+tests/test_geofence.py::test_radial_geofence_containment PASSED          [ 15%]
+tests/test_geofence.py::test_polygon_geofence_containment PASSED         [ 20%]
+tests/test_geofence.py::test_geofence_engine_transition_lifecycle PASSED [ 25%]
+tests/test_geofence.py::test_duplicate_geofence_registration PASSED      [ 30%]
+tests/test_index.py::test_spatial_grid_insert_and_query PASSED           [ 35%]
+tests/test_index.py::test_spatial_grid_remove PASSED                     [ 40%]
+tests/test_index.py::test_spatial_grid_radius_query PASSED               [ 45%]
+tests/test_kinematics.py::test_kinematic_velocity_and_bearing PASSED     [ 50%]
+tests/test_kinematics.py::test_dead_reckoning_prediction PASSED          [ 55%]
+tests/test_math.py::test_haversine_known_distances PASSED                [ 60%]
+tests/test_math.py::test_initial_bearing PASSED                          [ 65%]
+tests/test_math.py::test_dead_reckoning_destination PASSED               [ 70%]
+tests/test_math.py::test_point_in_polygon_convex PASSED                  [ 75%]
+tests/test_math.py::test_point_in_polygon_concave PASSED                 [ 80%]
+tests/test_server.py::test_health_endpoint PASSED                        [ 85%]
+tests/test_server.py::test_leaflet_dashboard_html PASSED                 [ 90%]
+tests/test_server.py::test_create_radial_and_polygon_geofence PASSED     [ 95%]
+tests/test_telemetry_ingestion_and_proximity PASSED                      [100%]
 
-============================= 16 passed in 0.75s ==============================
+============================= 20 passed in 2.33s ==============================
+```
+
+### Running Standalone Fleet Server & Leaflet.js Dashboard
+
+Launch the turnkey streaming server and open the live map dashboard in your browser:
+
+```bash
+geomesh serve --host 0.0.0.0 --port 8080
+```
+
+* **Interactive Live Map:** `http://localhost:8080/`
+* **Swagger OpenAPI Docs:** `http://localhost:8080/docs`
+
+#### REST API Ingestion Examples:
+
+```bash
+# 1. Register Radial Geofence (Kotoka Airport, 1.5km radius)
+curl -X POST http://localhost:8080/v1/geofences/radial \
+  -H "Content-Type: application/json" \
+  -d '{"geofence_id": "kotoka-airport", "name": "Kotoka Airport", "lat": 5.6037, "lon": -0.1870, "radius_m": 1500.0}'
+
+# 2. Ingest Live GPS Telemetry Ping
+curl -X POST http://localhost:8080/v1/telemetry \
+  -H "Content-Type: application/json" \
+  -d '{"entity_id": "van-gh-01", "lat": 5.6045, "lon": -0.1870, "speed_mps": 14.5, "heading_deg": 45.0}'
+
+# 3. Proximity Search (Assets within 2km radius)
+curl "http://localhost:8080/v1/proximity?lat=5.6037&lon=-0.1870&radius_m=2000"
+
+# 4. Dead-Reckoning Position Projection (30s future projection)
+curl "http://localhost:8080/v1/predict/van-gh-01?future_delta_sec=30"
+```
+
+### Production Docker Deployment
+
+Deploy with Docker in a single command:
+
+```bash
+docker build -t geomesh-stream .
+docker run -d -p 8080:8080 --name geomesh geomesh-stream
 ```
 
 ### Executing Microsecond Benchmarks

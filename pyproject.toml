@@ -10,7 +10,10 @@ readme = "README.md"
 authors = [{ name = "Huighlet Eyram Zowonu" }]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+]
 
 [project.scripts]
 geomesh = "geomesh.cli:main"
