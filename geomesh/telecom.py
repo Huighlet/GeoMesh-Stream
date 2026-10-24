@@ -15,6 +15,7 @@ import hmac
 import json
 import math
 import os
+import re
 import time
 import urllib.request
 import urllib.error
@@ -40,6 +41,57 @@ class VesselStatus(enum.StrEnum):
     OVERDUE = "OVERDUE"
     SOS_DISTRESS = "SOS_DISTRESS"
     ADRIFT_WARNING = "ADRIFT_WARNING"
+
+
+def normalize_ghana_phone(phone: str) -> str:
+    """Normalize any Ghana phone number format to canonical E.164 (+233XXXXXXXXX)."""
+    if not phone:
+        return ""
+    digits = re.sub(r"[^\d+]", "", phone.strip())
+    if digits.startswith("+233") and len(digits) == 13:
+        return digits
+    if digits.startswith("233") and len(digits) == 12:
+        return f"+{digits}"
+    if digits.startswith("0") and len(digits) == 10:
+        return f"+233{digits[1:]}"
+    if len(digits) == 9 and not digits.startswith("0"):
+        return f"+233{digits}"
+    if not digits.startswith("+"):
+        return f"+{digits}"
+    return digits
+
+
+BEACH_TOWER_MAP: Dict[str, str] = {
+    "Keta Beach": "TOWER_KETA_SEAWARD",
+    "Keta": "TOWER_KETA_SEAWARD",
+    "Dzelukope": "TOWER_DZELUKOPE_SEAWARD",
+    "Anloga": "TOWER_ANLOGA_SEAWARD",
+    "Aflao": "TOWER_AFLAO_SEAWARD",
+    "Anyanui": "TOWER_ANYANUI_SEAWARD",
+    "Ada Foah": "TOWER_ADA_FOAH_SEAWARD",
+    "Prampram": "TOWER_PRAMPRAM_SEAWARD",
+    "Old Ningo": "TOWER_OLD_NINGO_SEAWARD",
+    "Tema Manhean": "TOWER_TEMA_SEAWARD",
+    "Tema": "TOWER_TEMA_SEAWARD",
+    "Teshie": "TOWER_TESHIE_SEAWARD",
+    "Jamestown": "TOWER_JAMESTOWN_SEAWARD",
+    "Chorkor": "TOWER_JAMESTOWN_SEAWARD",
+    "Kokrobite": "TOWER_KOKROBITE_SEAWARD",
+    "Senya Beraku": "TOWER_SENYA_BERAKU_SEAWARD",
+    "Winneba": "TOWER_WINNEBA_SEAWARD",
+    "Apam": "TOWER_APAM_SEAWARD",
+    "Saltpond": "TOWER_SALTPOND_SEAWARD",
+    "Cape Coast": "TOWER_CAPECOAST_SEAWARD",
+    "Elmina": "TOWER_ELMINA_SEAWARD",
+    "Komenda": "TOWER_KOMENDA_SEAWARD",
+    "Shama": "TOWER_SHAMA_SEAWARD",
+    "Sekondi": "TOWER_SEKONDI_SEAWARD",
+    "Takoradi": "TOWER_TAKORADI_SEAWARD",
+    "Dixcove": "TOWER_DIXCOVE_SEAWARD",
+    "Cape Three Points": "TOWER_CAPETHREEPOINTS_SEAWARD",
+    "Axim": "TOWER_AXIM_SEAWARD",
+    "Half Assini": "TOWER_HALF_ASSINI_SEAWARD",
+}
 
 
 @dataclasses.dataclass(slots=True)
@@ -292,7 +344,7 @@ class TelecomPassiveGateway:
         One-Time Lifetime Subscription.
         The fisherman never needs to register or dial again.
         """
-        clean_phone = phone_number.strip().replace(" ", "")
+        clean_phone = normalize_ghana_phone(phone_number)
         now_sec = time.time()
         sub = CanoeSubscriber(
             phone_number=clean_phone,
@@ -320,7 +372,9 @@ class TelecomPassiveGateway:
         return sub
 
     def get_subscriber(self, phone_number: str) -> Optional[CanoeSubscriber]:
-        return self._subscribers.get(phone_number.strip().replace(" ", ""))
+        clean = phone_number.strip().replace(" ", "")
+        canonical = normalize_ghana_phone(clean)
+        return self._subscribers.get(canonical) or self._subscribers.get(clean)
 
     def list_subscribers(self) -> List[CanoeSubscriber]:
         return list(self._subscribers.values())
@@ -328,9 +382,13 @@ class TelecomPassiveGateway:
     def delete_subscriber(self, phone_number: str) -> bool:
         """Remove a subscriber from memory and durable storage."""
         clean = phone_number.strip().replace(" ", "")
+        canonical = normalize_ghana_phone(clean)
+        self._subscribers.pop(canonical, None)
         self._subscribers.pop(clean, None)
         if self.store:
-            return self.store.delete_subscriber(clean)
+            r1 = self.store.delete_subscriber(canonical)
+            r2 = self.store.delete_subscriber(clean) if clean != canonical else False
+            return r1 or r2
         return True
 
     def trigger_sos(
@@ -342,7 +400,7 @@ class TelecomPassiveGateway:
         Ingest emergency SOS distress signal sent from a keypad phone (via SMS or USSD *920*44#).
         Immediately transitions canoe status to SOS_DISTRESS and updates durable store.
         """
-        clean_phone = phone_number.strip().replace(" ", "")
+        clean_phone = normalize_ghana_phone(phone_number)
         sub = self.get_subscriber(clean_phone)
         if not sub:
             sub = self.register_subscriber(clean_phone, f"Canoe-{clean_phone[-4:]}")
@@ -388,6 +446,17 @@ class TelecomPassiveGateway:
     def register_tower(self, tower: TowerSector) -> None:
         self._towers[tower.tower_id] = tower
 
+    def get_tower_for_beach(self, landing_beach: str) -> TowerSector:
+        """Find the corresponding seaward cell tower for a given landing beach."""
+        tower_id = BEACH_TOWER_MAP.get(landing_beach.strip())
+        if tower_id and tower_id in self._towers:
+            return self._towers[tower_id]
+        for beach, tid in BEACH_TOWER_MAP.items():
+            if beach.lower() in landing_beach.lower() or landing_beach.lower() in beach.lower():
+                if tid in self._towers:
+                    return self._towers[tid]
+        return self._towers.get("TOWER_KETA_SEAWARD", list(self._towers.values())[0])
+
     def process_passive_cell_event(
         self,
         phone_number: str,
@@ -400,8 +469,8 @@ class TelecomPassiveGateway:
         Ingest passive radio network event (Handover, Location Update, or Silent Paging).
         Automatically transitions canoe state without any user interaction.
         """
-        clean_phone = phone_number.strip().replace(" ", "")
-        sub = self._subscribers.get(clean_phone)
+        clean_phone = normalize_ghana_phone(phone_number)
+        sub = self.get_subscriber(clean_phone)
         if not sub:
             # Auto-register unknown number with default profile
             sub = self.register_subscriber(clean_phone, f"Canoe-{clean_phone[-4:]}")
@@ -413,6 +482,8 @@ class TelecomPassiveGateway:
                 if tid.upper() in tower_id.upper() or tower_id.upper() in tid.upper():
                     tower = t
                     break
+            if not tower:
+                tower = self.get_tower_for_beach(tower_id)
             if not tower:
                 raise ValueError(f"Unknown coastal tower: '{tower_id}'")
 
@@ -518,6 +589,8 @@ class TelecomPassiveGateway:
         )
         if not phone:
             raise ValueError("Missing 'msisdn' or 'phone_number' in carrier payload.")
+
+        phone = normalize_ghana_phone(phone)
 
         # Extract Tower / Cell ID
         tower_id = (

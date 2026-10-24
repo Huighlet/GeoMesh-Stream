@@ -224,11 +224,24 @@ class DurableStore:
         with self._lock:
             conn = self._get_conn()
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM subscribers WHERE phone_number = ?;", (phone_number,))
-            row = cursor.fetchone()
-            if not row:
-                return None
-            return SubscriberRecord(**dict(row))
+            clean = phone_number.strip().replace(" ", "")
+            variants = [clean]
+            if clean.startswith("0") and len(clean) == 10:
+                variants.append(f"+233{clean[1:]}")
+                variants.append(f"233{clean[1:]}")
+            elif clean.startswith("+233") and len(clean) == 13:
+                variants.append(f"0{clean[4:]}")
+                variants.append(clean[1:])
+            elif clean.startswith("233") and len(clean) == 12:
+                variants.append(f"+{clean}")
+                variants.append(f"0{clean[3:]}")
+
+            for v in variants:
+                cursor.execute("SELECT * FROM subscribers WHERE phone_number = ?;", (v,))
+                row = cursor.fetchone()
+                if row:
+                    return SubscriberRecord(**dict(row))
+            return None
 
     def list_subscribers(self) -> List[SubscriberRecord]:
         with self._lock:
@@ -242,7 +255,23 @@ class DurableStore:
             conn = self._get_conn()
             with conn:
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM subscribers WHERE phone_number = ?;", (phone_number,))
+                clean = phone_number.strip().replace(" ", "")
+                variants = [clean]
+                if clean.startswith("0") and len(clean) == 10:
+                    variants.append(f"+233{clean[1:]}")
+                    variants.append(f"233{clean[1:]}")
+                elif clean.startswith("+233") and len(clean) == 13:
+                    variants.append(f"0{clean[4:]}")
+                    variants.append(clean[1:])
+                elif clean.startswith("233") and len(clean) == 12:
+                    variants.append(f"+{clean}")
+                    variants.append(f"0{clean[3:]}")
+
+                placeholders = ",".join(["?"] * len(variants))
+                cursor.execute(f"DELETE FROM voyages WHERE phone_number IN ({placeholders});", tuple(variants))
+                cursor.execute(f"DELETE FROM cell_events WHERE phone_number IN ({placeholders});", tuple(variants))
+                cursor.execute(f"DELETE FROM sar_incidents WHERE phone_number IN ({placeholders});", tuple(variants))
+                cursor.execute(f"DELETE FROM subscribers WHERE phone_number IN ({placeholders});", tuple(variants))
                 return cursor.rowcount > 0
 
     # -------------------------------------------------------------------------

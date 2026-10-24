@@ -26,6 +26,7 @@ from geomesh.telecom import (
     MaritimeVoiceAlertService,
     TelecomPassiveGateway,
     VesselStatus,
+    normalize_ghana_phone,
 )
 from geomesh.types import (
     GeofenceAlreadyExistsError,
@@ -362,11 +363,19 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
             "active_geofences": active_fences,
         })
 
+    hazards = []
+    for v in vehicles:
+        if v["entity_id"].startswith("canoe-"):
+            h_list = check_collision_risks(engine, v["entity_id"])
+            if h_list:
+                hazards.extend(h_list)
+
     return {
         "snapshot_id": snapshot_id,
         "timestamp_ns": time.time_ns(),
         "total_tracked_vehicles": len(vehicles),
         "vehicles": vehicles,
+        "collision_hazards": hazards,
         "status": "FLEET_SNAPSHOT_COMMITTED",
     }
 
@@ -454,6 +463,61 @@ def get_collision_risk(
     }
 
 
+def check_collision_risks(engine: GeoMeshEngine, vessel_id: str) -> List[Dict[str, Any]]:
+    """
+    Evaluate ARPA collision risk (CPA/TCPA) between vessel_id and nearby vessels.
+    If a commercial tanker and an artisanal canoe are on a collision course (CPA <= 1.0 NM, TCPA <= 20 min),
+    automatically dispatch an audible mother-tongue robocall to the canoe.
+    """
+    hazards = []
+    state = engine.get_kinematic_state(vessel_id)
+    if not state:
+        return hazards
+
+    nearby = engine.query_radius(state.last_point, radius_m=9260.0)
+    for other_id, pt, dist_m in nearby:
+        if other_id == vessel_id:
+            continue
+        is_pair = (vessel_id.startswith("canoe-") and not other_id.startswith("canoe-")) or \
+                  (not vessel_id.startswith("canoe-") and other_id.startswith("canoe-"))
+        if not is_pair:
+            continue
+
+        cpa_res = engine.calculate_cpa_tcpa(vessel_id, other_id)
+        if not cpa_res:
+            continue
+        cpa_m, tcpa_s = cpa_res
+        cpa_nm = round(cpa_m / 1852.0, 2)
+        tcpa_min = round(tcpa_s / 60.0, 1)
+
+        if cpa_nm <= 1.0 and 0.0 < tcpa_min <= 20.0:
+            canoe_id = vessel_id if vessel_id.startswith("canoe-") else other_id
+            threat_id = other_id if vessel_id.startswith("canoe-") else vessel_id
+            clean_phone = canoe_id.replace("canoe-", "")
+            sub = telecom_gateway.get_subscriber(clean_phone)
+            call_res = None
+            if sub:
+                call_res = telecom_gateway._voice_service.dispatch_alert_call(
+                    subscriber=sub,
+                    threat_vessel=f"Commercial Vessel ({threat_id})",
+                    cpa_nm=cpa_nm,
+                    tcpa_min=tcpa_min,
+                )
+            hazards.append({
+                "threat_vessel": threat_id,
+                "canoe_id": canoe_id,
+                "canoe_name": sub.canoe_name if sub else "Artisanal Canoe",
+                "phone_number": clean_phone,
+                "language": str(sub.language) if sub else "EWE",
+                "cpa_nm": cpa_nm,
+                "tcpa_minutes": tcpa_min,
+                "distance_m": round(dist_m, 1),
+                "robocall_dispatched": True,
+                "voice_script": (call_res.get("audio_message") or call_res.get("voice_script") or "") if call_res else "",
+            })
+    return hazards
+
+
 # -------------------------------------------------------------------------
 # Telecom Passive LBS & Artisanal Fishermen Registry
 # -------------------------------------------------------------------------
@@ -532,6 +596,7 @@ def ingest_cell_event(req: CellEventRequest) -> Dict[str, Any]:
     engine = get_engine()
     alerts = engine.ingest_telemetry(ping)
     res["spatial_alerts"] = [{"event": str(a.event), "geofence_id": a.geofence_id} for a in alerts]
+    res["collision_hazards"] = check_collision_risks(engine, ping.entity_id)
     return res
 
 
@@ -692,9 +757,21 @@ def list_sar_incidents(active_only: bool = Query(True)) -> Dict[str, Any]:
 @app.post("/v1/sar/resolve/{incident_id}", tags=["Search and Rescue (SAR)"])
 def resolve_sar_incident(incident_id: str) -> Dict[str, Any]:
     """Close an active SAR incident upon safe recovery."""
+    inc = durable_store.get_sar_incident(incident_id)
     success = durable_store.resolve_sar_incident(incident_id, "RESOLVED")
     if not success:
         raise HTTPException(status_code=404, detail=f"SAR incident '{incident_id}' not found.")
+    if inc:
+        sub = telecom_gateway.get_subscriber(inc.phone_number)
+        if sub:
+            sub.status = VesselStatus.ON_SHORE
+            sub.sea_departure_ts_ns = None
+            if durable_store:
+                durable_store.close_voyage(inc.phone_number)
+                rec = durable_store.get_subscriber(inc.phone_number)
+                if rec:
+                    rec.status = "ON_SHORE"
+                    durable_store.save_subscriber(rec)
     return {"resolved": True, "incident_id": incident_id, "status": "RESOLVED"}
 
 
@@ -748,6 +825,11 @@ def trigger_keypad_sos(req: SOSRequest) -> Dict[str, Any]:
 def delete_subscriber(phone_number: str) -> Dict[str, Any]:
     """Unenroll / delete a registered artisanal canoe from system memory and database."""
     success = telecom_gateway.delete_subscriber(phone_number)
+    engine = get_engine()
+    engine.remove_entity(f"canoe-{phone_number}")
+    canonical = normalize_ghana_phone(phone_number)
+    if canonical != phone_number:
+        engine.remove_entity(f"canoe-{canonical}")
     return {"deleted": success, "phone_number": phone_number}
 
 
@@ -1114,9 +1196,12 @@ def get_map_dashboard() -> str:
                   <strong style="color:#f8fafc;">${s.canoe_name}</strong> <span style="color:#94a3b8;font-size:0.68rem;">(${s.phone_number})</span><br>
                   <span style="color:#64748b;font-size:0.66rem;">${s.landing_beach} &bull; ${s.language}</span>
                 </div>
-                <div style="text-align:right;">
-                  <span style="background:${badgeColor};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.65rem;font-weight:700;">${s.status}</span>
-                  <button class="btn btn-sm" style="background:#475569;margin-left:4px;padding:1px 5px;" onclick="unenrollCanoe('${s.phone_number}')">🗑️</button>
+                <div style="text-align:right;display:flex;gap:3px;align-items:center;">
+                  <span style="background:${badgeColor};color:#fff;padding:2px 5px;border-radius:3px;font-size:0.65rem;font-weight:700;">${s.status}</span>
+                  ${s.status === 'ON_SHORE' ? `<button class="btn btn-sm" style="background:#0284c7;padding:1px 4px;" title="Simulate Launch" onclick="quickLaunch('${s.phone_number}', '${s.landing_beach}')">🚀</button>` : ''}
+                  ${s.status === 'AT_SEA' ? `<button class="btn btn-sm" style="background:#10b981;padding:1px 4px;" title="Return Safe" onclick="quickReturn('${s.phone_number}', '${s.landing_beach}')">🏖️</button>` : ''}
+                  ${s.status !== 'SOS_DISTRESS' ? `<button class="btn btn-sm" style="background:#dc2626;padding:1px 4px;" title="Distress SOS" onclick="quickSOS('${s.phone_number}')">🚨</button>` : ''}
+                  <button class="btn btn-sm" style="background:#475569;padding:1px 4px;" title="Unenroll" onclick="unenrollCanoe('${s.phone_number}')">🗑️</button>
                 </div>
               </div>
             `;
@@ -1159,7 +1244,14 @@ def get_map_dashboard() -> str:
                 dashArray: '5, 5'
               }).addTo(map);
 
-              sarMarkers[inc.incident_id] = { marker, circle };
+              let driftLine = null;
+              if (inc.last_known_fix && inc.last_known_fix.lat) {
+                driftLine = L.polyline([
+                  [inc.last_known_fix.lat, inc.last_known_fix.lon],
+                  [datum.lat, datum.lon]
+                ], { color: '#f59e0b', weight: 2, dashArray: '6, 6' }).addTo(map).bindPopup(`<b>Guinea Current Drift Track</b><br>${inc.canoe_name} carried ${inc.drift_distance_nm} NM Eastward towards Togo`);
+              }
+              sarMarkers[inc.incident_id] = { marker, circle, driftLine };
             }
 
             return `
@@ -1199,6 +1291,28 @@ def get_map_dashboard() -> str:
               }).addTo(map).bindPopup(`<b>${v.entity_id}</b><br>Pos: [${v.position.lat.toFixed(4)}, ${v.position.lon.toFixed(4)}]<br>Speed: ${v.kinematics.velocity_mps.toFixed(1)} m/s`);
             }
           });
+
+          if (snap.collision_hazards && snap.collision_hazards.length > 0) {
+            snap.collision_hazards.forEach(h => {
+              const tanker = vesselMarkers[h.threat_vessel];
+              const canoe = vesselMarkers[h.canoe_id];
+              if (tanker && canoe) {
+                if (!window.hazardLine) {
+                  window.hazardLine = L.polyline([tanker.getLatLng(), canoe.getLatLng()], {
+                    color: '#ef4444',
+                    weight: 3,
+                    dashArray: '5, 5'
+                  }).addTo(map);
+                } else {
+                  window.hazardLine.setLatLngs([tanker.getLatLng(), canoe.getLatLng()]);
+                }
+              }
+              logEvent(`🚨 [COLLISION CONVERGENCE] Tanker ${h.threat_vessel} converging on ${h.canoe_name}! CPA: ${h.cpa_nm} NM in ${h.tcpa_minutes}m! Robocall dispatched in ${h.language}: "${h.voice_script}"`, 'event-cpa');
+            });
+          } else if (window.hazardLine) {
+            map.removeLayer(window.hazardLine);
+            window.hazardLine = null;
+          }
         }
       } catch (e) {}
     }
@@ -1271,6 +1385,7 @@ def get_map_dashboard() -> str:
       if (sarMarkers[incId]) {
         map.removeLayer(sarMarkers[incId].marker);
         map.removeLayer(sarMarkers[incId].circle);
+        if (sarMarkers[incId].driftLine) map.removeLayer(sarMarkers[incId].driftLine);
         delete sarMarkers[incId];
       }
       logEvent(`[SAR RESOLVED] Incident ${incId} marked safely recovered.`, 'event-enter');
@@ -1311,16 +1426,77 @@ def get_map_dashboard() -> str:
     }
 
     async function injectAISVessel() {
-      logEvent('[AIS INGESTION] Ingesting Class-A crude tanker NMEA radio sentence...', 'event-info');
-      const sample = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
-      const resp = await fetch('/v1/ais/nmea', {
+      const subsResp = await fetch('/v1/telecom/subscribers');
+      const subsData = await subsResp.json();
+      const canoeAtSea = subsData.subscribers.find(s => s.status === 'AT_SEA' && s.last_point);
+
+      if (canoeAtSea) {
+        const lat = canoeAtSea.last_point.lat - 0.025;
+        const lon = canoeAtSea.last_point.lon + 0.002;
+        logEvent(`[COLLISION TEST] Ingesting converging tanker 1.6 NM south of ${canoeAtSea.canoe_name}...`, 'event-cpa');
+        await fetch('/v1/telemetry', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            entity_id: 'MMSI-636019842',
+            lat: lat,
+            lon: lon,
+            speed_mps: 7.2,
+            heading_deg: 0.0
+          })
+        });
+        logEvent(`[AIS TANKER MAPPED] MMSI 636019842 at [${lat.toFixed(4)}, ${lon.toFixed(4)}] Heading: 000° at 14kt`, 'event-info');
+      } else {
+        logEvent('[AIS INGESTION] Ingesting Class-A crude tanker at Tema Anchorage VHF...', 'event-info');
+        const sample = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
+        const resp = await fetch('/v1/ais/nmea', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ raw_nmea: sample })
+        });
+        const data = await resp.json();
+        logEvent(`[AIS TANKER MAPPED] MMSI ${data.mmsi} Speed: ${data.speed_knots}kt Heading: ${data.heading_deg}°`, 'event-info');
+      }
+      await pollRadar();
+    }
+
+    async function quickLaunch(phone, beach) {
+      logEvent(`[LAUNCH] Simulating departure from ${beach} for ${phone}...`, 'event-info');
+      const resp = await fetch('/v1/telecom/cell-event', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ raw_nmea: sample })
+        body: JSON.stringify({ phone_number: phone, tower_id: beach, timing_advance: 8 })
       });
       const data = await resp.json();
-      logEvent(`[AIS TANKER MAPPED] MMSI ${data.mmsi} Speed: ${data.speed_knots}kt Heading: ${data.heading_deg}°`, 'event-info');
+      logEvent(`[AT SEA] ${data.canoe_name} is now ${data.distance_offshore_km} km offshore via ${data.tower_name}.`, 'event-enter');
+      await refreshRoster();
       await pollRadar();
+    }
+
+    async function quickReturn(phone, beach) {
+      logEvent(`[RETURN] Simulating safe beach landing at ${beach} for ${phone}...`, 'event-info');
+      const resp = await fetch('/v1/telecom/cell-event', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ phone_number: phone, tower_id: beach, timing_advance: 0 })
+      });
+      const data = await resp.json();
+      logEvent(`[RETURNED SAFELY] ${data.canoe_name} safely landed on shore!`, 'event-enter');
+      await refreshRoster();
+      await pollRadar();
+    }
+
+    async function quickSOS(phone) {
+      logEvent(`[KEYPAD MAYDAY] Incoming USSD/SMS SOS from ${phone}...`, 'event-cpa');
+      const resp = await fetch('/v1/telecom/sos', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ phone_number: phone, message: 'MAYDAY_ENGINE_FAILURE' })
+      });
+      const data = await resp.json();
+      logEvent(`🚨 [MAYDAY ACTIVATED]: ${data.canoe_name} triggered SOS! Navy rescue docket created.`, 'event-cpa');
+      await refreshSAR();
+      await refreshRoster();
     }
 
     async function clearRadar() {
