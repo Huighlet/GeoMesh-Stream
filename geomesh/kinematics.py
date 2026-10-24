@@ -5,7 +5,7 @@ Derives velocity, bearing, acceleration, and projects future coordinates during 
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from geomesh.math import dead_reckoning_destination, haversine_distance, initial_bearing
 from geomesh.types import KinematicState, Point, TelemetryPing
@@ -102,3 +102,55 @@ class KinematicTracker:
             distance_m=dist,
             bearing_deg=state.bearing_deg,
         )
+
+    def calculate_cpa_tcpa(
+        self,
+        entity_id_1: str,
+        entity_id_2: str,
+    ) -> Optional[Tuple[float, float]]:
+        """
+        Compute Maritime Closest Point of Approach (CPA) and Time to CPA (TCPA).
+        Standard ARPA radar collision avoidance algorithm adapted for WGS-84 coordinates.
+        Returns:
+            (cpa_meters, tcpa_seconds) or None if either entity has no kinematic state.
+        """
+        s1 = self._states.get(entity_id_1)
+        s2 = self._states.get(entity_id_2)
+        if not s1 or not s2:
+            return None
+
+        import math
+        mid_lat = math.radians((s1.last_point.lat + s2.last_point.lat) / 2.0)
+        meters_per_deg_lat = 111_320.0
+        meters_per_deg_lon = 111_320.0 * max(0.01, math.cos(mid_lat))
+
+        dx = (s1.last_point.lon - s2.last_point.lon) * meters_per_deg_lon
+        dy = (s1.last_point.lat - s2.last_point.lat) * meters_per_deg_lat
+
+        b1_rad = math.radians(s1.bearing_deg)
+        b2_rad = math.radians(s2.bearing_deg)
+
+        vx1 = s1.velocity_mps * math.sin(b1_rad)
+        vy1 = s1.velocity_mps * math.cos(b1_rad)
+
+        vx2 = s2.velocity_mps * math.sin(b2_rad)
+        vy2 = s2.velocity_mps * math.cos(b2_rad)
+
+        dvx = vx1 - vx2
+        dvy = vy1 - vy2
+        v_rel_sq = (dvx * dvx) + (dvy * dvy)
+
+        current_dist = math.hypot(dx, dy)
+
+        if v_rel_sq < 1e-4:
+            return current_dist, 0.0
+
+        tcpa = -((dx * dvx) + (dy * dvy)) / v_rel_sq
+        if tcpa < 0.0:
+            return current_dist, 0.0
+
+        cpa_x = dx + (dvx * tcpa)
+        cpa_y = dy + (dvy * tcpa)
+        cpa_dist = math.hypot(cpa_x, cpa_y)
+
+        return cpa_dist, tcpa

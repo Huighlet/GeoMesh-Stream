@@ -111,3 +111,12 @@ class GeoMeshEngine:
         """Predict future coordinate using dead-reckoning extrapolation."""
         with self._lock:
             return self.kinematics.predict_position(entity_id, future_delta_sec)
+
+    def calculate_cpa_tcpa(
+        self,
+        entity_id_1: str,
+        entity_id_2: str,
+    ) -> Optional[Tuple[float, float]]:
+        """Calculate Closest Point of Approach (CPA) and Time to CPA (TCPA) between two vessels."""
+        with self._lock:
+            return self.kinematics.calculate_cpa_tcpa(entity_id_1, entity_id_2)

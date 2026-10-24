@@ -353,153 +353,307 @@ def predict_position(
     }
 
 
+@app.get("/v1/maritime/cpa", tags=["Maritime Safety"])
+def get_collision_risk(
+    vessel_1: str = Query(..., description="First vessel ID / Tanker MMSI"),
+    vessel_2: str = Query(..., description="Second vessel ID / Artisanal Canoe ID"),
+) -> Dict[str, Any]:
+    """Calculate Closest Point of Approach (CPA) and Time to CPA (TCPA) between two vessels."""
+    engine = get_engine()
+    res = engine.calculate_cpa_tcpa(vessel_1, vessel_2)
+    if not res:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Kinematic telemetry missing for '{vessel_1}' or '{vessel_2}'.",
+        )
+
+    cpa_m, tcpa_s = res
+    cpa_nm = round(cpa_m / 1852.0, 2)
+    tcpa_min = round(tcpa_s / 60.0, 1)
+
+    risk_level = "LOW"
+    if cpa_nm < 1.0 and tcpa_min < 15.0:
+        risk_level = "CRITICAL_COLLISION_ALERT"
+    elif cpa_nm < 2.5 and tcpa_min < 30.0:
+        risk_level = "WARNING_CONVERGING"
+
+    return {
+        "vessel_1": vessel_1,
+        "vessel_2": vessel_2,
+        "cpa_meters": round(cpa_m, 1),
+        "cpa_nautical_miles": cpa_nm,
+        "tcpa_seconds": round(tcpa_s, 1),
+        "tcpa_minutes": tcpa_min,
+        "risk_level": risk_level,
+    }
+
+
 # -------------------------------------------------------------------------
 # Embedded Interactive Leaflet.js Map Dashboard
 # -------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
 def get_map_dashboard() -> str:
-    """Serve embedded interactive real-time Leaflet.js tracking dashboard."""
+    """Serve embedded interactive real-time Ghana Maritime tracking dashboard."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>GeoMesh-Stream: Real-Time Fleet & Geofence Dashboard</title>
+  <title>GeoMesh-Stream: Ghana Maritime Collision Avoidance & Coastal Radar</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; }
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #070d18; color: #f8fafc; }
     #container { display: flex; height: 100vh; }
-    #sidebar { width: 380px; background: #1e293b; padding: 20px; overflow-y: auto; border-right: 1px solid #334155; }
+    #sidebar { width: 400px; background: #0f172a; padding: 22px; overflow-y: auto; border-right: 1px solid #1e293b; box-shadow: 2px 0 10px rgba(0,0,0,0.5); }
     #map { flex-grow: 1; height: 100%; }
     h1 { font-size: 1.15rem; margin-top: 0; color: #38bdf8; display: flex; align-items: center; justify-content: space-between; }
-    .badge { font-size: 0.7rem; background: #0284c7; padding: 3px 8px; border-radius: 9999px; }
-    .btn { background: #0284c7; color: white; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 600; margin-bottom: 12px; }
+    .badge { font-size: 0.65rem; background: #0284c7; padding: 3px 8px; border-radius: 9999px; letter-spacing: 0.05em; font-weight: 700; }
+    .btn { background: #0284c7; color: white; border: none; padding: 10px 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 600; font-size: 0.85rem; margin-bottom: 14px; transition: background 0.2s; }
     .btn:hover { background: #0369a1; }
-    .card { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 12px; margin-bottom: 14px; }
-    .card h3 { margin-top: 0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }
-    .event-log { font-family: monospace; font-size: 0.75rem; max-height: 250px; overflow-y: auto; background: #020617; padding: 8px; border-radius: 4px; }
-    .event-enter { color: #4ade80; }
-    .event-exit { color: #f87171; }
-    .leaflet-tile { filter: invert(100%) hue-rotate(180deg) brightness(90%) contrast(90%); }
-    .leaflet-container { background: #0b0f19; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 12px; margin-bottom: 14px; }
+    .card h3 { margin-top: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 8px; }
+    .event-log { font-family: monospace; font-size: 0.75rem; max-height: 260px; overflow-y: auto; background: #020617; padding: 10px; border-radius: 4px; line-height: 1.5; border: 1px solid #1e293b; }
+    .event-enter { color: #f87171; font-weight: 600; }
+    .event-exit { color: #fbbf24; }
+    .event-cpa { color: #ef4444; font-weight: 700; }
+    .event-info { color: #38bdf8; }
+    .leaflet-tile { filter: invert(100%) hue-rotate(180deg) brightness(88%) contrast(90%); }
+    .leaflet-container { background: #050b14; }
+    .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-right: 4px; margin-bottom: 4px; }
   </style>
 </head>
 <body>
   <div id="container">
     <div id="sidebar">
-      <h1>GeoMesh-Stream <span class="badge">Live Telemetry</span></h1>
-      <p style="font-size: 0.8rem; color: #94a3b8;">High-Throughput Spatial Grid Indexing & Real-Time Geofencing Engine</p>
+      <h1>GeoMesh-Stream <span class="badge">GULF OF GUINEA</span></h1>
+      <p style="font-size: 0.78rem; color: #94a3b8; line-height: 1.4; margin-top: 4px;">
+        Ghana Coastal Vessel Telemetry & Artisanal Safety Engine (Keta &bull; Tema &bull; Volta Estuary).
+      </p>
       
-      <button class="btn" onclick="startSimulation()">Simulate Vehicle Fleet</button>
+      <button class="btn" onclick="startMaritimeSimulation()">Simulate Ghana Maritime Traffic</button>
 
       <div class="card">
-        <h3>Active Geofences</h3>
-        <div id="fenceList" style="font-size: 0.8rem;">Loading geofences...</div>
+        <h3>Protected Maritime Zones</h3>
+        <div id="fenceList" style="font-size: 0.78rem; line-height: 1.6;">Loading Ghana maritime zones...</div>
       </div>
 
       <div class="card">
-        <h3>Real-Time Breach Stream</h3>
-        <div id="eventLog" class="event-log">Listening for telemetry pings...</div>
+        <h3>Real-Time Collision & IEZ Incident Stream</h3>
+        <div id="eventLog" class="event-log">Monitoring Gulf of Guinea shipping lanes...</div>
       </div>
 
-      <div style="font-size: 0.75rem; color: #64748b; text-align: center;">
-        Interactive OpenAPI docs at <a href="/docs" target="_blank" style="color: #38bdf8;">/docs</a>
+      <div style="font-size: 0.72rem; color: #64748b; text-align: center; line-height: 1.4;">
+        Ghana Maritime Authority &amp; Fisheries Commission API<br>
+        OpenAPI docs at <a href="/docs" target="_blank" style="color: #38bdf8;">/docs</a> &bull; <a href="/metrics" target="_blank" style="color: #38bdf8;">/metrics</a>
       </div>
     </div>
     <div id="map"></div>
   </div>
 
   <script>
-    const map = L.map('map').setView([5.6037, -0.1870], 13);
+    // Center on Ghana coast (between Tema and Keta)
+    const map = L.map('map').setView([5.78, 0.45], 10);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    const vehicleMarkers = {};
+    const vesselMarkers = {};
     const logBox = document.getElementById('eventLog');
 
-    // Register initial demonstration geofences
-    async function initDemo() {
-      // 1. Kotoka Airport Radial Zone
-      await fetch('/v1/geofences/radial', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          geofence_id: 'kotoka-airport',
-          name: 'Kotoka Airport Zone',
-          lat: 5.6050,
-          lon: -0.1700,
-          radius_m: 1200
-        })
-      });
-
-      L.circle([5.6050, -0.1700], {
-        color: '#38bdf8',
-        fillColor: '#0284c7',
-        fillOpacity: 0.2,
-        radius: 1200
-      }).addTo(map).bindPopup('<b>Kotoka Airport Zone</b><br>Radius: 1,200m');
-
-      document.getElementById('fenceList').innerHTML = '<div>• <b>Kotoka Airport</b> (Radial 1.2km)</div>';
-    }
-    initDemo();
-
-    function logEvent(text, type) {
+    function logEvent(text, typeClass) {
       const line = document.createElement('div');
-      line.className = type === 'ENTER' ? 'event-enter' : 'event-exit';
+      line.className = typeClass || 'event-info';
       line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
       logBox.prepend(line);
     }
 
+    async function initGhanaMaritime() {
+      // 1. Tema Commercial Deepwater Anchorage
+      await fetch('/v1/geofences/radial', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          geofence_id: 'tema-commercial-anchorage',
+          name: 'Tema Port Deepwater Anchorage',
+          lat: 5.6200,
+          lon: 0.0500,
+          radius_m: 6500
+        })
+      });
+
+      L.circle([5.6200, 0.0500], {
+        color: '#38bdf8',
+        fillColor: '#0284c7',
+        fillOpacity: 0.15,
+        radius: 6500
+      }).addTo(map).bindPopup('<b>Tema Deepwater Anchorage</b><br>Crude Tankers & Container Roadstead');
+
+      // 2. Keta Artisanal Fishing Grounds
+      const ketaVerts = [
+        {"lat": 5.8200, "lon": 0.8800},
+        {"lat": 5.9500, "lon": 0.9800},
+        {"lat": 5.9200, "lon": 1.1500},
+        {"lat": 5.7600, "lon": 1.0500}
+      ];
+      await fetch('/v1/geofences/polygon', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          geofence_id: 'keta-artisanal-grounds',
+          name: 'Keta Artisanal Fishing Grounds',
+          vertices: ketaVerts
+        })
+      });
+
+      L.polygon([[5.8200, 0.8800], [5.9500, 0.9800], [5.9200, 1.1500], [5.7600, 1.0500]], {
+        color: '#10b981',
+        fillColor: '#059669',
+        fillOpacity: 0.18,
+        weight: 2
+      }).addTo(map).bindPopup('<b>Keta Artisanal Grounds</b><br>Cape St. Paul to Dzelukope Canoe Fishery');
+
+      // 3. Ghana 6NM Inshore Exclusion Zone (IEZ)
+      const iezVerts = [
+        {"lat": 5.7000, "lon": 0.0500},
+        {"lat": 5.7600, "lon": 0.6300},
+        {"lat": 5.7800, "lon": 0.9000},
+        {"lat": 5.9200, "lon": 1.0500},
+        {"lat": 6.1000, "lon": 1.2000},
+        {"lat": 6.0000, "lon": 1.3000},
+        {"lat": 5.7000, "lon": 1.1200},
+        {"lat": 5.6000, "lon": 0.6500},
+        {"lat": 5.5500, "lon": 0.1000}
+      ];
+      await fetch('/v1/geofences/polygon', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          geofence_id: 'ghana-iez-reserve',
+          name: 'Ghana 6NM Inshore Exclusion Zone (IEZ)',
+          vertices: iezVerts
+        })
+      });
+
+      L.polygon(iezVerts.map(v => [v.lat, v.lon]), {
+        color: '#f59e0b',
+        fillColor: '#d97706',
+        fillOpacity: 0.08,
+        weight: 1.5,
+        dashArray: '6, 6'
+      }).addTo(map).bindPopup('<b>Ghana Inshore Exclusion Zone (IEZ)</b><br>6 Nautical Mile Artisanal Fishing Reserve (Fisheries Act 625)');
+
+      // Togo Border Line Marker
+      L.polyline([[6.1000, 1.2000], [5.5500, 1.2000]], {
+        color: '#ef4444',
+        weight: 2,
+        dashArray: '4, 4'
+      }).addTo(map).bindPopup('<b>Ghana - Togo Maritime Boundary</b>');
+
+      document.getElementById('fenceList').innerHTML = `
+        <div><span class="zone-pill" style="background:#0284c7;color:#fff;">ANCHORAGE</span> <b>Tema Deepwater Roadstead</b> (6.5km)</div>
+        <div><span class="zone-pill" style="background:#059669;color:#fff;">ARTISANAL</span> <b>Keta Coastal Fishing Grounds</b></div>
+        <div><span class="zone-pill" style="background:#d97706;color:#fff;">IEZ</span> <b>Ghana 6NM Exclusion Strip</b> (Act 625)</div>
+        <div><span class="zone-pill" style="background:#ef4444;color:#fff;">BORDER</span> <b>Ghana - Togo Maritime Line (Aflao)</b></div>
+      `;
+    }
+    initGhanaMaritime();
+
     let simInterval = null;
     let simStep = 0;
 
-    function startSimulation() {
+    function startMaritimeSimulation() {
       if (simInterval) clearInterval(simInterval);
-      logBox.innerHTML = '<div>Simulation started...</div>';
+      logBox.innerHTML = '<div class="event-info">Ghana maritime traffic stream started...</div>';
 
       simInterval = setInterval(async () => {
         simStep++;
-        // Vehicle travels toward and through airport geofence
-        const lat = 5.6000 + (Math.sin(simStep * 0.15) * 0.012);
-        const lon = -0.1900 + (simStep * 0.001);
 
-        const resp = await fetch('/v1/telemetry', {
+        // 1. Commercial Tanker MT African Runner (MMSI: 627001420)
+        // Traveling WSW along shipping channel towards Tema
+        const tankerLat = 5.7500 - (simStep * 0.0022);
+        const tankerLon = 0.8500 - (simStep * 0.0065);
+        const tankerResp = await fetch('/v1/telemetry', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
-            entity_id: 'haulage-truck-01',
-            lat: lat,
-            lon: lon,
-            speed_mps: 18.5,
-            heading_deg: 75.0
+            entity_id: 'tanker-african-runner',
+            lat: tankerLat,
+            lon: tankerLon,
+            speed_mps: 8.2, // ~16 knots
+            heading_deg: 245.0
           })
         });
+        const tankerData = await tankerResp.json();
 
-        const data = await resp.json();
-        
-        // Update Marker
-        if (!vehicleMarkers['haulage-truck-01']) {
-          vehicleMarkers['haulage-truck-01'] = L.circleMarker([lat, lon], {
-            radius: 8,
-            fillColor: '#f59e0b',
+        // 2. Artisanal Canoe Keta-01 [Nyimdzii] (Local fishermen with smartphone GPS)
+        // Night drift-fishing off Cape St. Paul / Keta
+        const canoeLat = 5.8200 - (simStep * 0.0008);
+        const canoeLon = 0.8100 + (simStep * 0.0004);
+        const canoeResp = await fetch('/v1/telemetry', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            entity_id: 'canoe-keta-01',
+            lat: canoeLat,
+            lon: canoeLon,
+            speed_mps: 1.8, // ~3.5 knots
+            heading_deg: 155.0
+          })
+        });
+        const canoeData = await canoeResp.json();
+
+        // Update Map Markers
+        if (!vesselMarkers['tanker-african-runner']) {
+          vesselMarkers['tanker-african-runner'] = L.circleMarker([tankerLat, tankerLon], {
+            radius: 9,
+            fillColor: '#38bdf8',
             color: '#fff',
             weight: 2,
-            fillOpacity: 0.9
-          }).addTo(map).bindPopup('<b>Haulage Truck 01</b>');
+            fillOpacity: 0.95
+          }).addTo(map).bindPopup('<b>MT African Runner</b><br>Crude Tanker (85,000 DWT)<br>Speed: 16.0 kt &bull; AIS Class A');
         } else {
-          vehicleMarkers['haulage-truck-01'].setLatLng([lat, lon]);
+          vesselMarkers['tanker-african-runner'].setLatLng([tankerLat, tankerLon]);
         }
 
-        // Log alerts
-        if (data.alerts && data.alerts.length > 0) {
-          data.alerts.forEach(a => {
-            logEvent(`${a.event} ${a.geofence_id} (Dwell: ${a.dwell_duration_sec.toFixed(1)}s)`, a.event);
+        if (!vesselMarkers['canoe-keta-01']) {
+          vesselMarkers['canoe-keta-01'] = L.circleMarker([canoeLat, canoeLon], {
+            radius: 7,
+            fillColor: '#10b981',
+            color: '#fff',
+            weight: 2,
+            fillOpacity: 0.95
+          }).addTo(map).bindPopup('<b>Canoe Keta-01 [Nyimdzii]</b><br>Artisanal Fishermen (Phone GPS)<br>Speed: 3.5 kt &bull; Cape St. Paul');
+        } else {
+          vesselMarkers['canoe-keta-01'].setLatLng([canoeLat, canoeLon]);
+        }
+
+        // Query CPA between Tanker and Canoe
+        try {
+          const cpaResp = await fetch(`/v1/maritime/cpa?vessel_1=tanker-african-runner&vessel_2=canoe-keta-01`);
+          if (cpaResp.ok) {
+            const cpaData = await cpaResp.json();
+            if (cpaData.risk_level === 'CRITICAL_COLLISION_ALERT') {
+              logEvent(`CRITICAL COLLISION ALERT: MT African Runner CPA ${cpaData.cpa_nautical_miles} NM with Canoe Keta-01 (TCPA: ${cpaData.tcpa_minutes}m)`, 'event-cpa');
+            } else if (cpaData.risk_level === 'WARNING_CONVERGING') {
+              logEvent(`CONVERGING: MT African Runner & Canoe Keta-01 CPA ${cpaData.cpa_nautical_miles} NM (TCPA: ${cpaData.tcpa_minutes}m)`, 'event-exit');
+            }
+          }
+        } catch (e) {}
+
+        // Log geofence perimeter events
+        if (tankerData.alerts && tankerData.alerts.length > 0) {
+          tankerData.alerts.forEach(a => {
+            logEvent(`[TANKER] ${a.event} on ${a.geofence_id} (Dwell: ${a.dwell_duration_sec.toFixed(0)}s)`, a.event === 'ENTER' ? 'event-enter' : 'event-exit');
           });
         }
-      }, 1000);
+        if (canoeData.alerts && canoeData.alerts.length > 0) {
+          canoeData.alerts.forEach(a => {
+            logEvent(`[CANOE] ${a.event} on ${a.geofence_id}`, 'event-info');
+          });
+        }
+      }, 1200);
     }
   </script>
 </body>

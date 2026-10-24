@@ -1,8 +1,8 @@
 # GeoMesh-Stream
 
-**Real-Time Telemetry & Spatial Geofence Stream Engine with Spatial Grid Indexing & Kinematics**
+**Real-Time Ghana Maritime Vessel Stream, Collision Avoidance & Coastal Geofence Engine**
 
-[![Build Status](https://img.shields.io/badge/tests-20%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
+[![Build Status](https://img.shields.io/badge/tests-26%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Zero AI Slop](https://img.shields.io/badge/codebase-zero%20ai%20slop-black.svg)](https://github.com/Huighlet/GeoMesh-Stream)
@@ -11,43 +11,52 @@
 
 ## Executive Summary
 
-Real-time spatial systems in logistics, fleet telemetry, autonomous mobility, ride-hailing, and maritime navigation process millions of high-frequency GPS coordinate pings per second. Naive point-in-polygon (PIP) testing across complex geographic perimeters incurs an asymptotic complexity of $\mathcal{O}(N \cdot V)$ per incoming ping—where $N$ is the number of active geofences and $V$ is the average vertex count per polygon—rapidly exhausting CPU compute capacity and introducing processing lag.
+Coastal maritime environments in the **Gulf of Guinea** present a dual-class safety challenge: heavy industrial commercial vessels (crude oil tankers and container carriers calling at **Tema Port**) navigate shared waters alongside thousands of **Ghanaian artisanal wooden fishing canoes** (operating out of **Keta, Cape St. Paul, Ada Foah, and Prampram**). While commercial ships transmit Class-A AIS transponder telemetry, small-scale artisanal fishermen navigate at night with only basic smartphone GPS, creating severe collision hazards, illegal industrial encroachment into protected coastal reserves, and perilous drift conditions when motors fail.
 
-**GeoMesh-Stream** is an ultra-low latency, zero-dependency streaming geospatial engine written in Python 3.13. It solves the scalability bottleneck through a **Discrete Spatial Grid Index** that prunes candidate geofences in $\mathcal{O}(1)$ time before applying SIMD-friendly Haversine checks and ray-casting algorithms. The system features state-machine transition tracking (`ENTER`, `EXIT`, `DWELL`), kinematic velocity/heading estimation, and great-circle **Dead-Reckoning Extrapolation** to project asset trajectories during GPS signal loss or packet drop.
+**GeoMesh-Stream** is an ultra-low latency, zero-dependency streaming geospatial engine written in Python 3.13. It unifies dual-class vessel telemetry into a high-performance **Discrete Spatial Grid Index ($\mathcal{O}(1)$ AABB candidate pruning)**, executing:
+1. **Closest Point of Approach (CPA & TCPA):** Computes convergent vessel vectors to dispatch critical collision alerts when industrial tankers converge within 1.0 Nautical Mile of artisanal canoes.
+2. **Ghana Inshore Exclusion Zone (IEZ) Enforcement:** Mathematically evaluates vessel boundaries against the 6-Nautical-Mile artisanal reserve codified under the **Ghana Fisheries Act (Act 625)** to detect illegal industrial trawler incursions.
+3. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Uses great-circle kinematics and prevailing eastward ocean current vectors ($\approx 1.4\text{ kt}$) to project search-and-rescue drift cones when artisanal phone signals drop offline.
 
 ---
 
 ## System Architecture
 
 ```
-                                  INCOMING GPS TELEMETRY PING
-                                 [entity_id, lat, lon, speed, ts]
-                                                |
-                                                v
-    +---------------------------------------------------------------------------------------+
-    |                                   GeoMeshEngine                                       |
-    |                                                                                       |
-    |  +------------------------------+             +------------------------------------+  |
-    |  |       KinematicTracker       |             |          SpatialGridIndex          |  |
-    |  |------------------------------|             |------------------------------------|  |
-    |  |  Velocity: v = Δd / Δt       |             |  Cell: (⌊lat/δ⌋, ⌊lon/δ⌋)          |  |
-    |  |  Heading: Azimuth θ          |             |  Candidate Geofences: O(1)         |  |
-    |  |  Acceleration: a = Δv / Δt   |             |  AABB Overlap Pruning              |  |
-    |  +------------------------------+             +------------------------------------+  |
-    |                 |                                                |                    |
-    +-----------------|------------------------------------------------|--------------------+
-                      |                                                |
-                      v                                                v
-    +----------------------------------+            +---------------------------------------+
-    | Dead-Reckoning Projected State   |            |           GeofenceEngine              |
-    | (Extrapolates Lost Pings)        |            |---------------------------------------|
-    +----------------------------------+            | Radial: Haversine d ≤ r               |
-                                                    | Polygon: Ray-Casting Intersect Count  |
-                                                    | State: ENTER / DWELL / EXIT           |
-                                                    +---------------------------------------+
-                                                                       |
-                                                                       v
-                                                           [GeofenceAlert Stream]
+                 DUAL-CLASS MARITIME TELEMETRY INGESTION
+     [AIS Class-A Tankers / Cargo]          [Artisanal Phone GPS Pings]
+      (MMSI, SOG, COG, Heading, ts)          (Canoe ID, Lat, Lon, Battery, ts)
+                   \                                 /
+                    \                               /
+                     v                             v
+     +---------------------------------------------------------------------------------------+
+     |                                   GeoMeshEngine                                       |
+     |                                                                                       |
+     |  +------------------------------+             +------------------------------------+  |
+     |  |       KinematicTracker       |             |          SpatialGridIndex          |  |
+     |  |------------------------------|             |------------------------------------|  |
+     |  |  Velocity: v = Δd / Δt       |             |  Cell: (⌊lat/δ⌋, ⌊lon/δ⌋)          |  |
+     |  |  Heading: Azimuth θ          |             |  Candidate Zones: O(1)             |  |
+     |  |  Acceleration: a = Δv / Δt   |             |  AABB Maritime Overlap Pruning     |  |
+     |  |  CPA / TCPA Collision Vectors|             |                                    |  |
+     |  +------------------------------+             +------------------------------------+  |
+     |                 |                                                |                    |
+     +-----------------|------------------------------------------------|--------------------+
+                       |                                                |
+                       v                                                v
+     +----------------------------------+            +---------------------------------------+
+     | Guinea Current Drift (SAR Cone)  |            |           GeofenceEngine              |
+     | (Extrapolates Adrift Canoes)     |            |---------------------------------------|
+     +----------------------------------+            | Radial: Tema Commercial Anchorage     |
+                                                     | Polygon: Ghana 6NM IEZ (Act 625)      |
+                                                     | Polygon: Keta Artisanal Grounds       |
+                                                     | Line: Ghana - Togo Maritime Border    |
+                                                     | State: ENTER / DWELL / EXIT           |
+                                                     +---------------------------------------+
+                                                                        |
+                                                                        v
+                                                   [Maritime Collision & Breach Stream]
+```
 ```
 
 ---

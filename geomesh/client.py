@@ -129,6 +129,13 @@ class GeoMeshClient:
         resp.raise_for_status()
         return resp.json()
 
+    def calculate_collision_risk(self, vessel_1: str, vessel_2: str) -> Dict[str, Any]:
+        """Calculate Closest Point of Approach (CPA in NM) and Time to CPA (TCPA in mins) between two vessels."""
+        params = {"vessel_1": vessel_1, "vessel_2": vessel_2}
+        resp = self._client.get("/v1/maritime/cpa", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
     def export_geofences(self) -> Dict[str, Any]:
         """Export all registered geofences for audit and disaster recovery."""
         resp = self._client.get("/v1/geofences/export")

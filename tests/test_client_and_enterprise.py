@@ -118,3 +118,27 @@ def test_client_sdk_end_to_end(sdk_client):
     pred = sdk_client.predict_position(entity_id="van-sdk-01", future_delta_sec=15.0)
     assert pred["entity_id"] == "van-sdk-01"
     assert "predicted_position" in pred
+
+
+def test_maritime_collision_risk_cpa(sdk_client):
+    # Ingest two converging vessels
+    sdk_client.ingest_telemetry(
+        entity_id="tanker-01",
+        lat=5.7800,
+        lon=0.9200,
+        speed_mps=8.0,
+        heading_deg=240.0,
+    )
+    sdk_client.ingest_telemetry(
+        entity_id="canoe-01",
+        lat=5.7750,
+        lon=0.9100,
+        speed_mps=2.0,
+        heading_deg=60.0,
+    )
+
+    cpa = sdk_client.calculate_collision_risk("tanker-01", "canoe-01")
+    assert "cpa_meters" in cpa
+    assert "tcpa_seconds" in cpa
+    assert "cpa_nautical_miles" in cpa
+    assert "risk_level" in cpa
