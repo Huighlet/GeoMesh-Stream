@@ -381,6 +381,8 @@ def get_map_dashboard() -> str:
     .event-log { font-family: monospace; font-size: 0.75rem; max-height: 250px; overflow-y: auto; background: #020617; padding: 8px; border-radius: 4px; }
     .event-enter { color: #4ade80; }
     .event-exit { color: #f87171; }
+    .leaflet-tile { filter: invert(100%) hue-rotate(180deg) brightness(90%) contrast(90%); }
+    .leaflet-container { background: #0b0f19; }
   </style>
 </head>
 <body>
@@ -410,9 +412,9 @@ def get_map_dashboard() -> str:
 
   <script>
     const map = L.map('map').setView([5.6037, -0.1870], 13);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
-      attribution: '&copy; CartoDB &copy; OpenStreetMap'
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
     const vehicleMarkers = {};
