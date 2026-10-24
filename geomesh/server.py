@@ -824,8 +824,12 @@ def get_map_dashboard() -> str:
     .event-info { color: #38bdf8; }
     .event-enter { color: #10b981; }
 
-    /* Native dark tiles */
+    /* Tactical Leaflet Styling */
     .leaflet-container { background: #070d19; }
+    .leaflet-control-layers { background: #0f172a !important; border: 1px solid #334155 !important; color: #e2e8f0 !important; border-radius: 6px !important; box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; font-size: 0.75rem !important; }
+    .leaflet-control-layers label { color: #e2e8f0 !important; font-size: 0.74rem !important; }
+    .leaflet-bar a { background-color: #0f172a !important; border-bottom: 1px solid #334155 !important; color: #e2e8f0 !important; }
+    .leaflet-bar a:hover { background-color: #1e293b !important; color: #38bdf8 !important; }
     .zone-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.66rem; margin-right: 4px; margin-bottom: 4px; }
   </style>
 </head>
@@ -962,10 +966,28 @@ def get_map_dashboard() -> str:
   <script>
     // National Map Initialization (Centered on Ghana Gulf of Guinea)
     const map = L.map('map', { zoomControl: true }).setView([5.30, -0.85], 8);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 19, subdomains: 'abcd',
+    const esriDark = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 16,
+      attribution: 'Tiles &copy; Esri &bull; Ghana Maritime Authority'
+    }).addTo(map);
+
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
       attribution: '&copy; OpenStreetMap contributors &bull; Ghana Maritime Authority'
-    }).addTo(map); setTimeout(() => { map.invalidateSize(); }, 250);
+    });
+
+    const esriSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 18,
+      attribution: 'Tiles &copy; Esri World Imagery &bull; Ghana Maritime Authority'
+    });
+
+    L.control.layers({
+      "Tactical Dark Radar": esriDark,
+      "Satellite Coastal": esriSat,
+      "OpenStreetMap (Nautical)": osm
+    }, null, { position: 'topright' }).addTo(map);
+
+    setTimeout(() => { map.invalidateSize(); }, 250);
 
     const vesselMarkers = {};
     const sarMarkers = {};
