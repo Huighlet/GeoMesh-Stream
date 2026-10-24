@@ -5,11 +5,13 @@ Includes REST API endpoints and an embedded interactive Leaflet.js web dashboard
 
 from __future__ import annotations
 
+import os
+import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Query, status
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from geomesh.engine import GeoMeshEngine
@@ -30,6 +32,95 @@ app = FastAPI(
 
 # Global engine instance
 _engine = GeoMeshEngine(cell_size_deg=0.02)
+_telemetry_pings_total = 0
+_geofence_breaches_total = 0
+
+
+class RateLimiter:
+    """Thread-safe Token Bucket Rate Limiter."""
+
+    def __init__(self, rate: float = 5000.0, capacity: float = 5000.0):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self, tokens: float = 1.0) -> Tuple[bool, int]:
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.last_update
+            self.last_update = now
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True, int(self.tokens)
+            return False, 0
+
+
+rate_limiter = RateLimiter(rate=5000.0, capacity=5000.0)
+
+
+@app.middleware("http")
+async def enterprise_security_middleware(request: Request, call_next):
+    """Enforces rate limiting and API key verification."""
+    if request.url.path in ["/health", "/docs", "/openapi.json", "/", "/metrics"]:
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = "5000"
+        response.headers["X-RateLimit-Remaining"] = "5000"
+        return response
+
+    allowed, remaining = rate_limiter.acquire()
+    if not allowed:
+        return Response(
+            content='{"detail": "Rate limit exceeded"}',
+            status_code=429,
+            media_type="application/json",
+            headers={"Retry-After": "1"},
+        )
+
+    configured_key = os.getenv("GEOMESH_API_KEY")
+    if configured_key and request.url.path.startswith("/v1/"):
+        req_key = request.headers.get("X-API-Key")
+        if req_key != configured_key:
+            return Response(
+                content='{"detail": "Unauthorized: Invalid or missing X-API-Key header"}',
+                status_code=401,
+                media_type="application/json",
+            )
+
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = "5000"
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    return response
+
+
+@app.get("/metrics", response_class=PlainTextResponse, tags=["Observability"])
+def get_metrics() -> PlainTextResponse:
+    """Prometheus metrics endpoint for geospatial ingestion throughput and geofence breaches."""
+    engine = get_engine()
+    geofences_count = engine.geofences.count_geofences()
+    entities_count = len(engine._entity_positions)
+    cells_count = len(engine.entity_index._grid)
+
+    lines = [
+        "# HELP geomesh_geofences_total Total registered geofences",
+        "# TYPE geomesh_geofences_total gauge",
+        f"geomesh_geofences_total {geofences_count}",
+        "# HELP geomesh_tracked_entities_total Total moving entities tracked in spatial mesh",
+        "# TYPE geomesh_tracked_entities_total gauge",
+        f"geomesh_tracked_entities_total {entities_count}",
+        "# HELP geomesh_spatial_cells_total Total active spatial hash grid cells",
+        "# TYPE geomesh_spatial_cells_total gauge",
+        f"geomesh_spatial_cells_total {cells_count}",
+        "# HELP geomesh_telemetry_pings_total Total ingested GPS telemetry pings",
+        "# TYPE geomesh_telemetry_pings_total counter",
+        f"geomesh_telemetry_pings_total {_telemetry_pings_total}",
+        "# HELP geomesh_geofence_breaches_total Total geofence alerts triggered",
+        "# TYPE geomesh_geofence_breaches_total counter",
+        f"geomesh_geofence_breaches_total {_geofence_breaches_total}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n")
 
 
 def get_engine() -> GeoMeshEngine:
@@ -127,6 +218,9 @@ def create_polygon_geofence(req: PolygonGeofenceRequest) -> Dict[str, Any]:
 
 @app.post("/v1/telemetry", tags=["Telemetry"])
 def ingest_telemetry(req: TelemetryPingRequest) -> Dict[str, Any]:
+    global _telemetry_pings_total, _geofence_breaches_total
+    _telemetry_pings_total += 1
+
     engine = get_engine()
     ts = req.timestamp_ns if req.timestamp_ns is not None else time.time_ns()
     ping = TelemetryPing.create(
@@ -139,6 +233,8 @@ def ingest_telemetry(req: TelemetryPingRequest) -> Dict[str, Any]:
     )
 
     alerts = engine.ingest_telemetry(ping)
+    if alerts:
+        _geofence_breaches_total += len(alerts)
     state = engine.get_kinematic_state(req.entity_id)
 
     return {
@@ -158,6 +254,64 @@ def ingest_telemetry(req: TelemetryPingRequest) -> Dict[str, Any]:
             }
             for a in alerts
         ],
+    }
+
+
+@app.get("/v1/geofences/export", tags=["Geofences"])
+def export_geofences() -> Dict[str, Any]:
+    """Export all active geofence geometries for auditing and disaster recovery."""
+    engine = get_engine()
+    fences_data = []
+    for fence_id, fence in engine.geofences._geofences.items():
+        f_info = {
+            "geofence_id": fence.geofence_id,
+            "name": fence.name,
+            "type": str(fence.fence_type),
+        }
+        if isinstance(fence, RadialGeofence):
+            f_info["center"] = {"lat": fence.center.lat, "lon": fence.center.lon}
+            f_info["radius_m"] = fence.radius_m
+        elif isinstance(fence, PolygonGeofence):
+            f_info["vertices"] = [{"lat": v.lat, "lon": v.lon} for v in fence.vertices]
+        fences_data.append(f_info)
+
+    return {
+        "timestamp_ns": time.time_ns(),
+        "total_geofences": len(fences_data),
+        "geofences": fences_data,
+    }
+
+
+@app.post("/v1/fleet/snapshot", tags=["Spatial Queries"])
+def snapshot_fleet() -> Dict[str, Any]:
+    """Capture point-in-time state checkpoint of all tracked fleet vehicles, positions, kinematics, and active breaches."""
+    engine = get_engine()
+    snapshot_id = f"snap_fleet_{int(time.time_ns())}"
+    vehicles = []
+
+    for ent_id, pos in engine._entity_positions.items():
+        k_state = engine.get_kinematic_state(ent_id)
+        pred_30s = engine.predict_position(ent_id, 30.0)
+        active_fences = list(engine.geofences._active_presence.get(ent_id, {}))
+
+        vehicles.append({
+            "entity_id": ent_id,
+            "position": {"lat": pos.lat, "lon": pos.lon},
+            "kinematics": {
+                "velocity_mps": k_state.velocity_mps if k_state else 0.0,
+                "bearing_deg": k_state.bearing_deg if k_state else 0.0,
+                "acceleration_mps2": k_state.acceleration_mps2 if k_state else 0.0,
+            },
+            "predicted_position_30s": {"lat": pred_30s.lat, "lon": pred_30s.lon} if pred_30s else None,
+            "active_geofences": active_fences,
+        })
+
+    return {
+        "snapshot_id": snapshot_id,
+        "timestamp_ns": time.time_ns(),
+        "total_tracked_vehicles": len(vehicles),
+        "vehicles": vehicles,
+        "status": "FLEET_SNAPSHOT_COMMITTED",
     }
 
 
