@@ -16,6 +16,12 @@ from pydantic import BaseModel, Field
 
 from geomesh.engine import GeoMeshEngine
 from geomesh.geofence import PolygonGeofence, RadialGeofence
+from geomesh.telecom import (
+    Language,
+    MaritimeVoiceAlertService,
+    TelecomPassiveGateway,
+    VesselStatus,
+)
 from geomesh.types import (
     GeofenceAlreadyExistsError,
     GeofenceNotFoundError,
@@ -30,10 +36,31 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Global engine instance
+# Global engine instance & telecom gateway
 _engine = GeoMeshEngine(cell_size_deg=0.02)
+telecom_gateway = TelecomPassiveGateway()
 _telemetry_pings_total = 0
 _geofence_breaches_total = 0
+
+# Seed registered Ghanaian artisanal fishermen for demonstration
+telecom_gateway.register_subscriber(
+    phone_number="+233241234501",
+    canoe_name="Nyimdzii [Keta-01]",
+    landing_beach="Keta Beach",
+    language=Language.EWE,
+)
+telecom_gateway.register_subscriber(
+    phone_number="+233241234502",
+    canoe_name="Mawueyro [Keta-02]",
+    landing_beach="Dzelukope",
+    language=Language.EWE,
+)
+telecom_gateway.register_subscriber(
+    phone_number="+233241234503",
+    canoe_name="Oshu [Jamestown-01]",
+    landing_beach="Jamestown",
+    language=Language.GA,
+)
 
 
 class RateLimiter:
@@ -389,6 +416,127 @@ def get_collision_risk(
 
 
 # -------------------------------------------------------------------------
+# Telecom Passive LBS & Artisanal Fishermen Registry
+# -------------------------------------------------------------------------
+
+class RegisterSubscriberRequest(BaseModel):
+    phone_number: str = Field(..., description="Ghanaian mobile number (e.g. 0241234567)")
+    canoe_name: str = Field(..., description="Canoe name / registration (e.g. Nyimdzii)")
+    landing_beach: str = Field(default="Keta Beach", description="Landing beach")
+    language: str = Field(default="EWE", description="Primary mother tongue (EWE, GA, FANTE, ENGLISH)")
+
+
+class CellEventRequest(BaseModel):
+    phone_number: str = Field(..., description="Subscriber phone number")
+    tower_id: str = Field(..., description="Cell tower sector ID")
+    timing_advance: int = Field(default=0, ge=0, le=64, description="GSM Timing Advance (0..64, each step = 550m)")
+    timestamp_ns: Optional[int] = None
+
+
+class VoiceAlertRequest(BaseModel):
+    phone_number: str
+    cpa_nm: float
+    tcpa_min: float
+
+
+@app.post("/v1/telecom/register", status_code=status.HTTP_201_CREATED, tags=["Telecom LBS & Artisanal Registry"])
+def register_subscriber(req: RegisterSubscriberRequest) -> Dict[str, Any]:
+    """
+    One-Time Lifetime Enrollment for Artisanal Fishermen.
+    Fishermen register phone number once. The system tracks departures automatically via passive cell handovers.
+    """
+    lang_str = req.language.upper()
+    lang = Language(lang_str) if lang_str in Language._value2member_map_ else Language.EWE
+    sub = telecom_gateway.register_subscriber(
+        phone_number=req.phone_number,
+        canoe_name=req.canoe_name,
+        landing_beach=req.landing_beach,
+        language=lang,
+    )
+    return {
+        "registered": True,
+        "phone_number": sub.phone_number,
+        "canoe_name": sub.canoe_name,
+        "landing_beach": sub.landing_beach,
+        "language": str(sub.language),
+        "status": str(sub.status),
+        "policy": "ONE_TIME_ENROLLMENT: Zero daily dials required from fisherman.",
+    }
+
+
+@app.get("/v1/telecom/subscribers", tags=["Telecom LBS & Artisanal Registry"])
+def list_subscribers() -> Dict[str, Any]:
+    """Retrieve all enrolled Ghanaian artisanal fishermen and their real-time sea/shore status."""
+    subs = telecom_gateway.list_subscribers()
+    return {
+        "total_subscribers": len(subs),
+        "subscribers": [
+            {
+                "phone_number": s.phone_number,
+                "canoe_name": s.canoe_name,
+                "landing_beach": s.landing_beach,
+                "language": str(s.language),
+                "status": str(s.status),
+                "last_seen_tower": s.last_seen_tower,
+                "last_timing_advance": s.last_timing_advance,
+                "last_point": {"lat": s.last_point.lat, "lon": s.last_point.lon} if s.last_point else None,
+                "distance_offshore_km": round((s.last_timing_advance * 550.0) / 1000.0, 2),
+            }
+            for s in subs
+        ],
+    }
+
+
+@app.post("/v1/telecom/cell-event", tags=["Telecom LBS & Artisanal Registry"])
+def ingest_cell_event(req: CellEventRequest) -> Dict[str, Any]:
+    """
+    Process passive GSM cell tower event (Handover, Location Update, or Silent Paging).
+    Automatically derives coordinate from Timing Advance and updates spatial tracking mesh.
+    """
+    res = telecom_gateway.process_passive_cell_event(
+        phone_number=req.phone_number,
+        tower_id=req.tower_id,
+        timing_advance=req.timing_advance,
+        timestamp_ns=req.timestamp_ns,
+    )
+
+    # Ingest derived coordinate into spatial engine
+    pos = res["derived_position"]
+    ping = TelemetryPing.create(
+        entity_id=f"canoe-{res['phone_number']}",
+        lat=pos["lat"],
+        lon=pos["lon"],
+        speed_mps=1.8 if res["status"] == "AT_SEA" else 0.0,
+        heading_deg=165.0,
+        timestamp_ns=res["timestamp_ns"],
+    )
+    engine = get_engine()
+    alerts = engine.ingest_telemetry(ping)
+    res["spatial_alerts"] = [{"event": str(a.event), "geofence_id": a.geofence_id} for a in alerts]
+    return res
+
+
+@app.post("/v1/telecom/alert/voice", tags=["Telecom LBS & Artisanal Registry"])
+def dispatch_voice_alert(req: VoiceAlertRequest) -> Dict[str, Any]:
+    """Dispatch automated multilingual emergency voice call (IVR robocall) in Ewe, Ga, Fante, or English."""
+    sub = telecom_gateway.get_subscriber(req.phone_number)
+    if not sub:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Subscriber with phone '{req.phone_number}' not found in registry.",
+        )
+
+    payload = MaritimeVoiceAlertService.generate_voice_payload(
+        phone_number=sub.phone_number,
+        canoe_name=sub.canoe_name,
+        language=sub.language,
+        cpa_nm=req.cpa_nm,
+        tcpa_min=req.tcpa_min,
+    )
+    return payload
+
+
+# -------------------------------------------------------------------------
 # Embedded Interactive Leaflet.js Map Dashboard
 # -------------------------------------------------------------------------
 
@@ -432,6 +580,35 @@ def get_map_dashboard() -> str:
       </p>
       
       <button class="btn" onclick="startMaritimeSimulation()">Simulate Ghana Maritime Traffic</button>
+      <button class="btn" style="background:#059669;margin-top:-6px;" onclick="simulatePassiveTelecomTrip()">Simulate Passive Zero-Touch Lifecycle (Ewe Call)</button>
+
+      <div class="card">
+        <h3>One-Time Fisherman Registration</h3>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:0.75rem;">
+          <input id="subPhone" type="text" placeholder="Phone (e.g. 0241234509)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+          <input id="subCanoe" type="text" placeholder="Canoe Name (e.g. Mawuena)" style="background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;" />
+          <div style="display:flex;gap:6px;">
+            <select id="subBeach" style="flex:1;background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;">
+              <option value="Keta Beach">Keta Beach</option>
+              <option value="Dzelukope">Dzelukope</option>
+              <option value="Ada Foah">Ada Foah</option>
+              <option value="Jamestown">Jamestown</option>
+            </select>
+            <select id="subLang" style="flex:1;background:#0b0f19;border:1px solid #334155;color:#fff;padding:6px;border-radius:4px;font-size:0.75rem;">
+              <option value="EWE">Ewe (Keta)</option>
+              <option value="GA">Ga (Accra)</option>
+              <option value="FANTE">Fante</option>
+              <option value="ENGLISH">English</option>
+            </select>
+          </div>
+          <button onclick="registerFisherman()" style="background:#4f46e5;color:#fff;border:none;padding:6px;border-radius:4px;cursor:pointer;font-weight:600;font-size:0.75rem;">Subscribe Once (Lifetime)</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Registered Artisanal Fleet (Passive Telco Status)</h3>
+        <div id="subscribersList" style="font-size:0.75rem;max-height:140px;overflow-y:auto;line-height:1.5;">Loading enrolled fishermen...</div>
+      </div>
 
       <div class="card">
         <h3>Protected Maritime Zones</h3>
@@ -557,8 +734,145 @@ def get_map_dashboard() -> str:
         <div><span class="zone-pill" style="background:#d97706;color:#fff;">IEZ</span> <b>Ghana 6NM Exclusion Strip</b> (Act 625)</div>
         <div><span class="zone-pill" style="background:#ef4444;color:#fff;">BORDER</span> <b>Ghana - Togo Maritime Line (Aflao)</b></div>
       `;
+      await refreshSubscribers();
     }
     initGhanaMaritime();
+
+    async function refreshSubscribers() {
+      try {
+        const resp = await fetch('/v1/telecom/subscribers');
+        if (resp.ok) {
+          const data = await resp.json();
+          const rows = data.subscribers.map(s => {
+            const isSea = s.status === 'AT_SEA';
+            const badgeColor = isSea ? '#0284c7' : '#10b981';
+            return `
+              <div style="border-bottom:1px solid #334155;padding:4px 0;display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <strong>${s.canoe_name}</strong> <span style="color:#94a3b8;font-size:0.7rem;">(${s.phone_number})</span><br>
+                  <span style="color:#64748b;font-size:0.68rem;">${s.landing_beach} &bull; ${s.language}</span>
+                </div>
+                <div style="text-align:right;">
+                  <span style="background:${badgeColor};color:#fff;padding:2px 6px;border-radius:4px;font-size:0.65rem;font-weight:700;">${s.status}</span>
+                  ${isSea ? `<div style="font-size:0.65rem;color:#38bdf8;margin-top:2px;">${s.distance_offshore_km} km out</div>` : ''}
+                </div>
+              </div>
+            `;
+          }).join('');
+          document.getElementById('subscribersList').innerHTML = rows || '<div style="color:#64748b;">No registered fishermen yet.</div>';
+        }
+      } catch(e) {}
+    }
+
+    async function registerFisherman() {
+      const phone = document.getElementById('subPhone').value;
+      const canoe = document.getElementById('subCanoe').value;
+      const beach = document.getElementById('subBeach').value;
+      const lang = document.getElementById('subLang').value;
+      if (!phone || !canoe) {
+        alert('Please enter phone number and canoe name.');
+        return;
+      }
+      const resp = await fetch('/v1/telecom/register', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          phone_number: phone,
+          canoe_name: canoe,
+          landing_beach: beach,
+          language: lang
+        })
+      });
+      if (resp.ok) {
+        document.getElementById('subPhone').value = '';
+        document.getElementById('subCanoe').value = '';
+        logEvent(`[ENROLLMENT] ${canoe} (${phone}) registered permanently! Zero daily dialing required.`, 'event-enter');
+        await refreshSubscribers();
+      }
+    }
+
+    async function simulatePassiveTelecomTrip() {
+      logEvent('=== SIMULATING ZERO-TOUCH PASSIVE TELCO LIFECYCLE ===', 'event-info');
+      logEvent('[PHASE 1] Canoe Nyimdzii leaves home in Keta town (Attached to Inland Tower)...', 'event-info');
+
+      // Step 1: Inland sector (on shore)
+      await fetch('/v1/telecom/cell-event', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          phone_number: '+233241234501',
+          tower_id: 'TOWER_KETA_INLAND',
+          timing_advance: 0
+        })
+      });
+      await refreshSubscribers();
+
+      setTimeout(async () => {
+        logEvent('[PHASE 2] PASSIVE HANDOVER: Phone attaches to Cape St. Paul Seaward Tower (TA: 6 = 3.3km offshore)...', 'event-enter');
+        const evResp = await fetch('/v1/telecom/cell-event', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            phone_number: '+233241234501',
+            tower_id: 'TOWER_KETA_SEAWARD',
+            timing_advance: 6
+          })
+        });
+        const evData = await evResp.json();
+        logEvent(`[AUTO-DEPARTURE] ${evData.canoe_name} detected AT_SEA (${evData.distance_offshore_km} km out) - ZERO DIALING REQUIRED!`, 'event-enter');
+        await refreshSubscribers();
+
+        // Move marker to derived position
+        const pos = evData.derived_position;
+        if (vesselMarkers['canoe-keta-01']) {
+          vesselMarkers['canoe-keta-01'].setLatLng([pos.lat, pos.lon]);
+        } else {
+          vesselMarkers['canoe-keta-01'] = L.circleMarker([pos.lat, pos.lon], {
+            radius: 8,
+            fillColor: '#10b981',
+            color: '#fff',
+            weight: 2,
+            fillOpacity: 0.95
+          }).addTo(map).bindPopup(`<b>Canoe Nyimdzii</b><br>Derived via Timing Advance: ${evData.distance_offshore_km} km`);
+        }
+
+        // Step 3: Trigger IVR Emergency Voice Call in Ewe
+        setTimeout(async () => {
+          logEvent('[PHASE 3] TANKER CONVERGENCE: Disagreeable night trajectory detected!', 'event-cpa');
+          const voiceResp = await fetch('/v1/telecom/alert/voice', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              phone_number: '+233241234501',
+              cpa_nm: 0.75,
+              tcpa_min: 8.5
+            })
+          });
+          const voiceData = await voiceResp.json();
+          logEvent(`📞 [OUTGOING GSM CALL TO ${voiceData.recipient_phone}]: Automated Voice Call Connected!`, 'event-cpa');
+          logEvent(`🔊 [AUDIO PLAYBACK IN EWE]: "${voiceData.audio_message}"`, 'event-cpa');
+
+          // Step 4: Returning to Shore
+          setTimeout(async () => {
+            logEvent('[PHASE 4] RETURN TO SHORE: Canoe returns to beach, handover to Inland Tower...', 'event-info');
+            const retResp = await fetch('/v1/telecom/cell-event', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                phone_number: '+233241234501',
+                tower_id: 'TOWER_KETA_INLAND',
+                timing_advance: 0
+              })
+            });
+            const retData = await retResp.json();
+            logEvent(`[SAFE LANDING] ${retData.canoe_name} marked ON_SHORE automatically. Watchdog reset.`, 'event-enter');
+            await refreshSubscribers();
+          }, 3500);
+
+        }, 2500);
+
+      }, 1800);
+    }
 
     let simInterval = null;
     let simStep = 0;
