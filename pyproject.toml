@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geomesh-stream"
+version = "1.0.0"
+description = "Real-Time Telemetry & Spatial Geofence Stream Engine with Spatial Grid Indexing & Kinematics"
+readme = "README.md"
+authors = [{ name = "Huighlet Eyram Zowonu" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+geomesh = "geomesh.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
