@@ -2,7 +2,7 @@
 
 **Real-Time Ghana Maritime Vessel Stream, Collision Avoidance & Coastal Geofence Engine**
 
-[![Build Status](https://img.shields.io/badge/tests-26%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
+[![Build Status](https://img.shields.io/badge/tests-31%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Zero AI Slop](https://img.shields.io/badge/codebase-zero%20ai%20slop-black.svg)](https://github.com/Huighlet/GeoMesh-Stream)
@@ -11,12 +11,16 @@
 
 ## Executive Summary
 
-Coastal maritime environments in the **Gulf of Guinea** present a dual-class safety challenge: heavy industrial commercial vessels (crude oil tankers and container carriers calling at **Tema Port**) navigate shared waters alongside thousands of **Ghanaian artisanal wooden fishing canoes** (operating out of **Keta, Cape St. Paul, Ada Foah, and Prampram**). While commercial ships transmit Class-A AIS transponder telemetry, small-scale artisanal fishermen navigate at night with only basic smartphone GPS, creating severe collision hazards, illegal industrial encroachment into protected coastal reserves, and perilous drift conditions when motors fail.
+Coastal maritime environments in the **Gulf of Guinea** present an acute dual-class safety challenge: heavy industrial commercial vessels (crude oil tankers and container carriers calling at **Tema Port**) navigate shared waters alongside thousands of **Ghanaian artisanal wooden fishing canoes** (operating out of **Keta, Cape St. Paul, Ada Foah, and Prampram**). While commercial ships transmit Class-A AIS transponder telemetry, artisanal fishermen navigate with standard \$10 keypad feature phones ("yam phones") without GPS apps, smartphones, or data connectivity. Requiring daily manual dialing or USSD codes leads to non-compliance and fatal collision blindspots.
 
-**GeoMesh-Stream** is an ultra-low latency, zero-dependency streaming geospatial engine written in Python 3.13. It unifies dual-class vessel telemetry into a high-performance **Discrete Spatial Grid Index ($\mathcal{O}(1)$ AABB candidate pruning)**, executing:
-1. **Closest Point of Approach (CPA & TCPA):** Computes convergent vessel vectors to dispatch critical collision alerts when industrial tankers converge within 1.0 Nautical Mile of artisanal canoes.
-2. **Ghana Inshore Exclusion Zone (IEZ) Enforcement:** Mathematically evaluates vessel boundaries against the 6-Nautical-Mile artisanal reserve codified under the **Ghana Fisheries Act (Act 625)** to detect illegal industrial trawler incursions.
-3. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Uses great-circle kinematics and prevailing eastward ocean current vectors ($\approx 1.4\text{ kt}$) to project search-and-rescue drift cones when artisanal phone signals drop offline.
+**GeoMesh-Stream** bridges this divide as an ultra-low latency, zero-dependency streaming geospatial engine written in Python 3.13. It unifies dual-class vessel telemetry into a high-performance **Discrete Spatial Grid Index ($\mathcal{O}(1)$ AABB candidate pruning)** and a **Zero-Touch Passive Telecom LBS Engine**:
+1. **Zero-Touch Keypad Phone Safety:** Fishermen enroll once at the landing beach with their phone number, canoe name, and native language (**Ewe** in Keta, **Ga** in Jamestown, **Fante** in Elmina). Zero daily dialing is required.
+2. **GSM Timing Advance (TA) Coordinate Derivation:** The passive telecom gateway derives offshore coordinates directly from cell tower radio propagation delays ($TA \times 550\text{m}$) and sector antenna azimuths (e.g., Cape St. Paul Seaward Sector).
+3. **Passive Cell Handover Tripwires:** Handover from an inland sector to a seaward sector automatically transitions the canoe from `ON_SHORE` to `AT_SEA`. Handover back inland automatically registers `RETURNED_SAFELY`.
+4. **Closest Point of Approach (CPA & TCPA):** Computes relative kinematic vectors to detect collision trajectories when industrial tankers converge within 1.0 Nautical Mile of artisanal canoes.
+5. **Mother-Tongue IVR Robocalls:** Automatically triggers instant audible phone calls in the fisherman's native dialect (Ewe/Ga/Fante) when CPA risk thresholds are breached.
+6. **Ghana Inshore Exclusion Zone (IEZ) Enforcement:** Mathematically evaluates vessel boundaries against the 6-Nautical-Mile artisanal reserve codified under the **Ghana Fisheries Act (Act 625)** to detect illegal industrial trawler incursions.
+7. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Uses great-circle kinematics and prevailing eastward ocean current vectors ($\approx 1.4\text{ kt}$) to project search-and-rescue drift cones when artisanal phone signals drop offline.
 
 ---
 
@@ -138,17 +142,25 @@ GeoMesh-Stream/
 │   ├── math.py               # Haversine, Bearing, Dead-Reckoning, Ray-Casting
 │   ├── index.py              # Discrete Uniform Spatial Grid Hash Index
 │   ├── geofence.py           # Radial & Polygon Geofences and State Machine
-│   ├── kinematics.py         # Kinematic state estimator and extrapolation
+│   ├── kinematics.py         # Kinematic state estimator and CPA/TCPA math
 │   ├── engine.py             # Unified streaming geospatial coordinator
+│   ├── telecom.py            # Zero-touch passive GSM LBS, TA derivation & IVR voice alerts
+│   ├── server.py             # Fast REST API, Prometheus metrics & Leaflet radar dashboard
+│   ├── client.py             # Idiomatic GeoMeshClient SDK
 │   └── cli.py                # Benchmark suite and CLI tool
+├── examples/
+│   └── simulate_ghana_maritime_mesh.py # End-to-end Ghana coastal simulation
 ├── tests/
 │   ├── test_math.py          # Ground-truth trigonometry and polygon tests
 │   ├── test_index.py         # Spatial cell hashing and radius search
 │   ├── test_geofence.py      # ENTER/EXIT transitions and dwell duration
 │   ├── test_kinematics.py    # Velocity, heading, and dead-reckoning checks
-│   └── test_engine.py        # Proximity queries and end-to-end ingestion
+│   ├── test_engine.py        # Proximity queries and end-to-end ingestion
+│   ├── test_server.py        # REST endpoints and live Leaflet dashboard
+│   ├── test_telecom.py       # Zero-touch subscribers, Timing Advance & voice alerts
+│   └── test_client_and_enterprise.py # RateLimiter, Prometheus, snapshots & CPA
 ├── pyproject.toml            # Build metadata and tool configuration
-├── requirements.txt          # Development dependencies (pytest)
+├── requirements.txt          # Development dependencies (pytest, uvicorn)
 ├── LICENSE                   # Apache-2.0 Open Source License
 └── README.md                 # System specification and documentation
 ```
@@ -179,28 +191,39 @@ pytest -v
 ```
 Output:
 ```
-tests/test_engine.py::test_engine_telemetry_and_alerts PASSED            [  5%]
-tests/test_engine.py::test_engine_query_radius PASSED                    [ 10%]
-tests/test_geofence.py::test_radial_geofence_containment PASSED          [ 15%]
-tests/test_geofence.py::test_polygon_geofence_containment PASSED         [ 20%]
-tests/test_geofence.py::test_geofence_engine_transition_lifecycle PASSED [ 25%]
-tests/test_geofence.py::test_duplicate_geofence_registration PASSED      [ 30%]
-tests/test_index.py::test_spatial_grid_insert_and_query PASSED           [ 35%]
-tests/test_index.py::test_spatial_grid_remove PASSED                     [ 40%]
-tests/test_index.py::test_spatial_grid_radius_query PASSED               [ 45%]
-tests/test_kinematics.py::test_kinematic_velocity_and_bearing PASSED     [ 50%]
-tests/test_kinematics.py::test_dead_reckoning_prediction PASSED          [ 55%]
-tests/test_math.py::test_haversine_known_distances PASSED                [ 60%]
-tests/test_math.py::test_initial_bearing PASSED                          [ 65%]
-tests/test_math.py::test_dead_reckoning_destination PASSED               [ 70%]
-tests/test_math.py::test_point_in_polygon_convex PASSED                  [ 75%]
-tests/test_math.py::test_point_in_polygon_concave PASSED                 [ 80%]
-tests/test_server.py::test_health_endpoint PASSED                        [ 85%]
-tests/test_server.py::test_leaflet_dashboard_html PASSED                 [ 90%]
-tests/test_server.py::test_create_radial_and_polygon_geofence PASSED     [ 95%]
-tests/test_telemetry_ingestion_and_proximity PASSED                      [100%]
+tests/test_client_and_enterprise.py::test_prometheus_metrics_endpoint PASSED [  3%]
+tests/test_client_and_enterprise.py::test_rate_limiter_headers PASSED    [  6%]
+tests/test_client_and_enterprise.py::test_geofences_export_manifest PASSED [  9%]
+tests/test_client_and_enterprise.py::test_fleet_state_snapshot PASSED    [ 12%]
+tests/test_client_and_enterprise.py::test_client_sdk_end_to_end PASSED   [ 16%]
+tests/test_client_and_enterprise.py::test_maritime_collision_risk_cpa PASSED [ 19%]
+tests/test_engine.py::test_engine_telemetry_and_alerts PASSED            [ 22%]
+tests/test_engine.py::test_engine_query_radius PASSED                    [ 25%]
+tests/test_geofence.py::test_radial_geofence_containment PASSED          [ 29%]
+tests/test_geofence.py::test_polygon_geofence_containment PASSED         [ 32%]
+tests/test_geofence.py::test_geofence_engine_transition_lifecycle PASSED [ 35%]
+tests/test_geofence.py::test_duplicate_geofence_registration PASSED      [ 38%]
+tests/test_index.py::test_spatial_grid_insert_and_query PASSED           [ 41%]
+tests/test_index.py::test_spatial_grid_remove PASSED                     [ 45%]
+tests/test_index.py::test_spatial_grid_radius_query PASSED               [ 48%]
+tests/test_kinematics.py::test_kinematic_velocity_and_bearing PASSED     [ 51%]
+tests/test_kinematics.py::test_dead_reckoning_prediction PASSED          [ 54%]
+tests/test_math.py::test_haversine_known_distances PASSED                [ 58%]
+tests/test_math.py::test_initial_bearing PASSED                          [ 61%]
+tests/test_math.py::test_dead_reckoning_destination PASSED               [ 64%]
+tests/test_math.py::test_point_in_polygon_convex PASSED                  [ 67%]
+tests/test_math.py::test_point_in_polygon_concave PASSED                 [ 70%]
+tests/test_server.py::test_health_endpoint PASSED                        [ 74%]
+tests/test_server.py::test_leaflet_dashboard_html PASSED                 [ 77%]
+tests/test_server.py::test_create_radial_and_polygon_geofence PASSED     [ 80%]
+tests/test_server.py::test_telemetry_ingestion_and_proximity PASSED      [ 83%]
+tests/test_telecom.py::test_one_time_subscriber_registration PASSED      [ 87%]
+tests/test_telecom.py::test_timing_advance_position_derivation PASSED    [ 90%]
+tests/test_telecom.py::test_passive_handover_zero_touch_lifecycle PASSED [ 93%]
+tests/test_telecom.py::test_multilingual_voice_alert_scripts PASSED      [ 96%]
+tests/test_telecom.py::test_telecom_rest_endpoints PASSED                [100%]
 
-============================= 20 passed in 2.33s ==============================
+======================== 31 passed in 1.89s ========================
 ```
 
 ### Running Standalone Fleet Server & Leaflet.js Dashboard
@@ -217,21 +240,50 @@ geomesh serve --host 0.0.0.0 --port 8080
 #### REST API Ingestion Examples:
 
 ```bash
-# 1. Register Radial Geofence (Kotoka Airport, 1.5km radius)
-curl -X POST http://localhost:8080/v1/geofences/radial \
+# 1. One-Time Registration for Keypad Phone Canoe Fisherman
+curl -X POST http://localhost:8008/v1/telecom/register \
   -H "Content-Type: application/json" \
-  -d '{"geofence_id": "kotoka-airport", "name": "Kotoka Airport", "lat": 5.6037, "lon": -0.1870, "radius_m": 1500.0}'
+  -d '{
+    "phone_number": "+233244111222",
+    "owner_name": "Kofi Nyamekye",
+    "canoe_name": "Nyame Nti",
+    "landing_beach": "Keta Beach",
+    "language": "ewe"
+  }'
 
-# 2. Ingest Live GPS Telemetry Ping
-curl -X POST http://localhost:8080/v1/telemetry \
+# 2. Passive Cell Handover & Timing Advance Ingestion (Tripwire: At Sea)
+curl -X POST http://localhost:8008/v1/telecom/cell-event \
   -H "Content-Type: application/json" \
-  -d '{"entity_id": "van-gh-01", "lat": 5.6045, "lon": -0.1870, "speed_mps": 14.5, "heading_deg": 45.0}'
+  -d '{
+    "phone_number": "+233244111222",
+    "sector_id": "KETA-CSP-S1",
+    "timing_advance": 12,
+    "signal_dbm": -82
+  }'
 
-# 3. Proximity Search (Assets within 2km radius)
-curl "http://localhost:8080/v1/proximity?lat=5.6037&lon=-0.1870&radius_m=2000"
+# 3. Ingest AIS Class-A Telemetry Ping (Crude Oil Tanker calling Tema)
+curl -X POST http://localhost:8008/v1/telemetry \
+  -H "Content-Type: application/json" \
+  -d '{
+    "entity_id": "MMSI-636019842",
+    "lat": 5.7600,
+    "lon": 0.9850,
+    "speed_mps": 8.2,
+    "heading_deg": 245.0
+  }'
 
-# 4. Dead-Reckoning Position Projection (30s future projection)
-curl "http://localhost:8080/v1/predict/van-gh-01?future_delta_sec=30"
+# 4. Closest Point of Approach (CPA/TCPA) Collision Calculation
+curl "http://localhost:8008/v1/maritime/cpa?vessel1_id=MMSI-636019842&vessel2_id=canoe-233244111222"
+
+# 5. Dispatch Multilingual IVR Robocall Alert (Ewe / Ga / Fante)
+curl -X POST http://localhost:8008/v1/telecom/alert/voice \
+  -H "Content-Type: application/json" \
+  -d '{
+    "phone_number": "+233244111222",
+    "threat_vessel": "Crude Oil Tanker Atlantic Pioneer",
+    "cpa_nm": 0.38,
+    "tcpa_min": 4.2
+  }'
 ```
 
 ### Production Docker Deployment
@@ -254,38 +306,52 @@ geomesh bench -n 100000
 
 ```python
 from geomesh import GeoMeshEngine, RadialGeofence, PolygonGeofence, Point, TelemetryPing
+from geomesh.telecom import TelecomPassiveGateway, MaritimeVoiceAlertService
 
-# 1. Initialize Geospatial Engine
+# 1. Initialize Maritime Geospatial Engine
 engine = GeoMeshEngine(cell_size_deg=0.02)
+telecom_gw = TelecomPassiveGateway(engine)
+voice_service = MaritimeVoiceAlertService()
 
-# 2. Register Geofence Perimeters
-airport_fence = RadialGeofence(
-    geofence_id="kotoka-airport",
-    center=Point(lat=5.6037, lon=-0.1870),
-    radius_m=1500.0,
+# 2. One-Time Registration for Keypad Phone Fishermen (Zero Daily Dialing)
+sub = telecom_gw.register_subscriber(
+    phone_number="+233244111222",
+    owner_name="Kofi Nyamekye",
+    canoe_name="Nyame Nti",
+    landing_beach="Keta Landing Beach",
+    language="ewe"
 )
-engine.register_geofence(airport_fence)
 
-# 3. Stream Telemetry Pings
-ping_1 = TelemetryPing.create(
-    entity_id="vehicle-gh-42",
-    lat=5.6050,
-    lon=-0.1870,
-    speed_mps=14.5,
-    heading_deg=350.0,
+# 3. Passive Cell Handover & Timing Advance Coordinate Derivation
+# Handset negotiates with Cape St. Paul Seaward Tower (TA=14 -> 7.7 km offshore)
+lat, lon = telecom_gw.process_cell_event(
+    phone_number="+233244111222",
+    sector_id="KETA-CSP-S1",
+    timing_advance=14,
+    signal_dbm=-82
 )
-alerts = engine.ingest_telemetry(ping_1)
-for alert in alerts:
-    print(f"Alert: {alert.event} {alert.geofence_id} by {alert.entity_id}")
+print(f"Passive Canoe Position: lat={lat:.4f}, lon={lon:.4f}")
 
-# 4. Proximity Radius Query (Find all assets within 2km)
-nearby_assets = engine.query_radius(center=Point(lat=5.6037, lon=-0.1870), radius_m=2000.0)
-for ent_id, pt, dist_m in nearby_assets:
-    print(f"Asset {ent_id} at {dist_m:.1f}m away")
+# 4. Ingest Converging AIS Commercial Tanker
+engine.ingest_telemetry(TelemetryPing.create(
+    entity_id="MMSI-636019842",
+    lat=5.7500,
+    lon=0.9900,
+    speed_mps=8.5,
+    heading_deg=240.0
+))
 
-# 5. Dead-Reckoning Position Prediction (30s ahead during signal loss)
-predicted_pt = engine.predict_position(entity_id="vehicle-gh-42", future_delta_sec=30.0)
-print(f"Extrapolated Position: lat={predicted_pt.lat:.5f}, lon={predicted_pt.lon:.5f}")
+# 5. Calculate Closest Point of Approach (CPA) & Trigger Mother-Tongue Robocall
+cpa = engine.get_vessel_cpa("MMSI-636019842", sub.entity_id)
+if cpa and cpa["collision_risk"]:
+    call = voice_service.dispatch_alert_call(
+        subscriber=sub,
+        threat_vessel="Crude Oil Tanker Atlantic Pioneer",
+        cpa_nm=cpa["cpa_nm"],
+        tcpa_min=cpa["tcpa_minutes"]
+    )
+    print(f"[EMERGENCY CALL DISPATCHED] Language: {call['language']}")
+    print(f"Audio Script: {call['voice_script']}")
 ```
 
 ---
