@@ -202,6 +202,15 @@ class AISNMEARequest(BaseModel):
     raw_nmea: str = Field(..., description="Single or multi-line NMEA 0183 !AIVDM string")
 
 
+class AISVesselInjectRequest(BaseModel):
+    mmsi: int = Field(..., description="Vessel MMSI 9-digit identifier")
+    vessel_name: str = Field(default="COMMERCIAL TANKER", description="Vessel name or callsign")
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
+    speed_knots: float = Field(default=16.5, ge=0.0, description="Speed over ground in knots")
+    heading_deg: float = Field(default=350.0, ge=0.0, le=360.0, description="Heading in degrees 0..360")
+
+
 class SARDeclareRequest(BaseModel):
     phone_number: str = Field(..., description="Registered fisherman's phone number")
     reason: str = Field(default="OVERDUE_VOYAGE_MOTOR_FAILURE", description="SAR incident declaration reason")
@@ -351,6 +360,13 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
         pred_30s = engine.predict_position(ent_id, 30.0)
         active_fences = list(engine.geofences._active_presence.get(ent_id, {}))
 
+        status_str = "UNDERWAY"
+        if ent_id.startswith("canoe-"):
+            clean_phone = ent_id.replace("canoe-", "")
+            sub = telecom_gateway.get_subscriber(clean_phone)
+            if sub:
+                status_str = sub.status.value if hasattr(sub.status, "value") else str(sub.status)
+
         vehicles.append({
             "entity_id": ent_id,
             "position": {"lat": pos.lat, "lon": pos.lon},
@@ -359,6 +375,9 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
                 "bearing_deg": k_state.bearing_deg if k_state else 0.0,
                 "acceleration_mps2": k_state.acceleration_mps2 if k_state else 0.0,
             },
+            "speed_mps": k_state.velocity_mps if k_state else 0.0,
+            "heading_deg": k_state.bearing_deg if k_state else 0.0,
+            "status": status_str,
             "predicted_position_30s": {"lat": pred_30s.lat, "lon": pred_30s.lon} if pred_30s else None,
             "active_geofences": active_fences,
         })
@@ -751,6 +770,35 @@ def ingest_ais_nmea(req: AISNMEARequest) -> Dict[str, Any]:
             "destination": report.destination,
         }
     return {"decoded": False}
+
+
+@app.post("/v1/ais/vessel/inject", tags=["AIS Commercial Ship Telemetry"])
+def inject_ais_vessel(req: AISVesselInjectRequest) -> Dict[str, Any]:
+    """Directly inject an AIS commercial vessel into the spatial mesh for collision avoidance testing."""
+    engine = get_engine()
+    speed_mps = req.speed_knots * 0.514444
+    ping = TelemetryPing.create(
+        entity_id=f"MMSI-{req.mmsi}",
+        lat=req.lat,
+        lon=req.lon,
+        speed_mps=speed_mps,
+        heading_deg=req.heading_deg,
+        timestamp_ns=time.time_ns(),
+    )
+    alerts = engine.ingest_telemetry(ping)
+    hazards = check_collision_risks(engine, ping.entity_id)
+    return {
+        "injected": True,
+        "mmsi": req.mmsi,
+        "vessel_name": req.vessel_name,
+        "entity_id": ping.entity_id,
+        "lat": req.lat,
+        "lon": req.lon,
+        "speed_knots": req.speed_knots,
+        "heading_deg": req.heading_deg,
+        "alerts": [{"event": str(a.event), "geofence_id": a.geofence_id} for a in alerts],
+        "hazards": hazards,
+    }
 
 
 # -------------------------------------------------------------------------
@@ -1274,6 +1322,40 @@ def get_map_dashboard() -> str:
     .event-info { color: #38bdf8; }
     .event-enter { color: #34d399; }
 
+    /* Tactical Leaflet Dark Glass Popups & Controls */
+    .leaflet-popup-content-wrapper {
+      background: rgba(10, 16, 31, 0.95) !important;
+      color: var(--text-main) !important;
+      border: 1px solid rgba(56, 189, 248, 0.35) !important;
+      border-radius: 8px !important;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.8), 0 0 16px rgba(56, 189, 248, 0.15) !important;
+      backdrop-filter: blur(12px) !important;
+      -webkit-backdrop-filter: blur(12px) !important;
+      padding: 4px !important;
+    }
+    .leaflet-popup-content {
+      font-family: 'Inter', -apple-system, sans-serif !important;
+      font-size: 0.75rem !important;
+      line-height: 1.5 !important;
+      margin: 8px 12px !important;
+      color: #cbd5e1 !important;
+    }
+    .leaflet-popup-content b, .leaflet-popup-content strong {
+      color: #f8fafc !important;
+    }
+    .leaflet-popup-tip {
+      background: rgba(10, 16, 31, 0.95) !important;
+      border: 1px solid rgba(56, 189, 248, 0.35) !important;
+      box-shadow: none !important;
+    }
+    .leaflet-container a.leaflet-popup-close-button {
+      color: #94a3b8 !important;
+      padding: 6px 24px 0 0 !important;
+    }
+    .leaflet-container a.leaflet-popup-close-button:hover {
+      color: #38bdf8 !important;
+    }
+
     /* Tactical Leaflet Overrides */
     .leaflet-bar a {
       background-color: var(--panel-bg) !important;
@@ -1522,10 +1604,9 @@ def get_map_dashboard() -> str:
     const map = L.map('map', { zoomControl: false }).setView([5.30, -0.85], 8);
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; CartoDB &copy; OpenStreetMap contributors &bull; GH-MARSAR',
-      maxZoom: 19,
-      subdomains: 'abcd'
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '&copy; Esri &bull; GEBCO, NOAA, National Geographic, Garmin &bull; GH-MARSAR C4ISR',
+      maxZoom: 16
     }).addTo(map);
 
     function logEvent(msg, type = 'event-info') {
@@ -2065,6 +2146,7 @@ def get_map_dashboard() -> str:
         });
         const data = await resp.json();
         logEvent(`[AIS TANKER ENGAGED] ${data.vessel_name} heading directly toward ${activeCanoe.canoe_name}! ARPA calculating CPA/TCPA...`, 'event-cpa');
+        map.flyTo([cLat, cLon], 12);
       } else {
         logEvent('[AIS INGESTION] Ingesting Class-A crude tanker at Tema Anchorage VHF...', 'event-info');
         const sample = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
