@@ -1936,29 +1936,98 @@ def get_map_dashboard() -> str:
     }
     .deck-tabs {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 4px;
-      padding: 8px 12px;
-      background: rgba(6, 10, 20, 0.6);
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+      padding: 8px 10px;
+      background: rgba(6, 10, 20, 0.7);
       border-bottom: 1px solid var(--panel-border);
     }
     .tab-btn {
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--text-muted);
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #94a3b8;
       font-size: 0.68rem;
       font-weight: 700;
-      padding: 6px 4px;
-      border-radius: 5px;
+      letter-spacing: 0.03em;
+      padding: 6px 3px;
+      border-radius: 6px;
       cursor: pointer;
       text-align: center;
-      transition: all 0.15s;
+      transition: all 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
       white-space: nowrap;
     }
-    .tab-btn.active {
-      background: rgba(56, 189, 248, 0.15);
-      color: var(--accent-cyan);
+    .tab-btn:hover {
+      background: rgba(56, 189, 248, 0.12);
       border-color: rgba(56, 189, 248, 0.3);
+      color: #f8fafc;
+    }
+    .tab-btn.active {
+      background: rgba(56, 189, 248, 0.2);
+      color: #38bdf8;
+      border-color: #38bdf8;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+    }
+
+    /* Floating Tactical Layer Controls */
+    #mapLayerControls {
+      position: absolute;
+      top: 78px;
+      right: 16px;
+      z-index: 999;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.70rem;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      background: rgba(10, 16, 31, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    }
+    #mapLayerControls label {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-weight: 600;
+      margin: 0;
+    }
+    #mapLayerControls input[type="checkbox"] {
+      cursor: pointer;
+      accent-color: #38bdf8;
+      width: 13px;
+      height: 13px;
+    }
+
+    /* Floating Maritime Legend */
+    #mapLegend {
+      position: absolute;
+      bottom: 44px;
+      left: 16px;
+      z-index: 999;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.68rem;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      color: #94a3b8;
+      background: rgba(10, 16, 31, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    }
+    .legend-swatch {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 2px;
     }
     .deck-content {
       flex: 1;
@@ -2141,6 +2210,25 @@ def get_map_dashboard() -> str:
   <!-- Full-Screen Tactical Canvas -->
   <div id="map"></div>
 
+  <!-- Floating Tactical Layer Controls -->
+  <div id="mapLayerControls">
+    <span style="color:#64748b;font-weight:700;">LAYERS:</span>
+    <label style="color:#f59e0b;"><input type="checkbox" id="layerAIS" checked onchange="toggleLayer('AIS')"> 🚢 AIS Ships</label>
+    <label style="color:#10b981;"><input type="checkbox" id="layerCanoes" checked onchange="toggleLayer('CANOES')"> 🛶 Canoes</label>
+    <label style="color:#38bdf8;"><input type="checkbox" id="layerIEZ" checked onchange="toggleLayer('IEZ')"> ━━ 6NM Inshore</label>
+    <label style="color:#06b6d4;"><input type="checkbox" id="layerTowers" checked onchange="toggleLayer('TOWERS')"> 🗼 Towers</label>
+    <label style="color:#ef4444;"><input type="checkbox" id="layerSAR" checked onchange="toggleLayer('SAR')"> ⭕ SAR Zones</label>
+  </div>
+
+  <!-- Floating Maritime Legend -->
+  <div id="mapLegend">
+    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#f59e0b;"></span> Commercial Vessel</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#10b981;border-radius:50%;"></span> Safe Canoe</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#ef4444;border-radius:50%;box-shadow:0 0 6px #ef4444;"></span> SOS / Adrift</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#06b6d4;border-radius:50%;"></span> Cell Sector</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:14px;border-top:2px dashed #0284c7;"></span> 6NM Exclusion</span>
+  </div>
+
   <!-- Top Floating National Command Header -->
   <div id="topbar" class="glass-panel">
     <div class="brand-section">
@@ -2211,12 +2299,24 @@ def get_map_dashboard() -> str:
 
     <!-- Navigation Tabs for Tactical Deck -->
     <div class="deck-tabs">
-      <button class="tab-btn active" onclick="switchDeckTab('LOCATE', this)">🛰️ LOCATOR</button>
-      <button class="tab-btn" onclick="switchDeckTab('PROBE', this)">⚡ RADIO PROBE</button>
-      <button class="tab-btn" onclick="switchDeckTab('SDR', this)">📡 SDR DIRECTION FINDER</button>
-      <button class="tab-btn" onclick="switchDeckTab('SAR', this)">🚨 SAR HOTLINE</button>
-      <button class="tab-btn" onclick="switchDeckTab('ROSTER', this)">🛶 FLEET</button>
-      <button class="tab-btn" onclick="switchDeckTab('OPS', this)">⚙️ OPERATIONS</button>
+      <button class="tab-btn active" onclick="switchDeckTab('LOCATE', this)">
+        <span style="font-size:0.85rem;">🔍</span><span>LOCATE</span>
+      </button>
+      <button class="tab-btn" onclick="switchDeckTab('PROBE', this)">
+        <span style="font-size:0.85rem;">⚡</span><span>PROBE</span>
+      </button>
+      <button class="tab-btn" onclick="switchDeckTab('SDR', this)">
+        <span style="font-size:0.85rem;">📡</span><span>SDR RF</span>
+      </button>
+      <button class="tab-btn" onclick="switchDeckTab('SAR', this)">
+        <span style="font-size:0.85rem;">🚨</span><span>SAR</span>
+      </button>
+      <button class="tab-btn" onclick="switchDeckTab('ROSTER', this)">
+        <span style="font-size:0.85rem;">🛶</span><span>FLEET</span>
+      </button>
+      <button class="tab-btn" onclick="switchDeckTab('OPS', this)">
+        <span style="font-size:0.85rem;">⚙️</span><span>OPS</span>
+      </button>
     </div>
 
     <div class="deck-content">
@@ -2396,12 +2496,16 @@ def get_map_dashboard() -> str:
   </div>
 
   <!-- Bottom Floating Telemetry Stream Dock -->
-  <div id="bottomDock" class="glass-panel">
+  <div id="bottomDock" class="glass-panel" style="max-height:32px;overflow:hidden;transition:max-height 0.3s ease;">
     <div class="dock-bar" onclick="toggleTelemetryDock()">
-      <span>▼ REAL-TIME TELEMETRY STREAM &bull; GULF OF GUINEA SURVEILLANCE</span>
-      <span style="color:var(--accent-cyan);font-size:0.68rem;">LIVE LOG</span>
+      <span style="display:flex;align-items:center;gap:8px;">
+        <span style="color:#38bdf8;">⚡</span>
+        <span style="font-weight:700;">TELEMETRY STREAM:</span>
+        <span id="dockTicker" style="color:#94a3b8;font-weight:400;">Surveillance active across 550km coastline...</span>
+      </span>
+      <button id="dockToggleBtn" class="btn btn-sm" style="padding:2px 8px;background:rgba(255,255,255,0.08);color:#94a3b8;border:1px solid rgba(255,255,255,0.1);">▲ EXPAND</button>
     </div>
-    <div id="eventLog" class="event-log">National surveillance active across 550km coastline...</div>
+    <div id="eventLog" class="event-log" style="height:90px;overflow-y:auto;padding:8px 14px;background:rgba(3,7,18,0.98);">National surveillance active across 550km coastline...</div>
   </div>
 
   <script>
@@ -2429,13 +2533,13 @@ def get_map_dashboard() -> str:
 
     function toggleTelemetryDock() {
       const dock = document.getElementById('bottomDock');
-      const log = document.getElementById('eventLog');
-      if (log.style.display === 'none') {
-        log.style.display = 'block';
-        dock.style.maxHeight = '140px';
-      } else {
-        log.style.display = 'none';
+      const toggleBtn = document.getElementById('dockToggleBtn');
+      if (dock.style.maxHeight === '120px') {
         dock.style.maxHeight = '32px';
+        if (toggleBtn) toggleBtn.innerText = '▲ EXPAND';
+      } else {
+        dock.style.maxHeight = '120px';
+        if (toggleBtn) toggleBtn.innerText = '▼ COLLAPSE';
       }
     }
 
@@ -2460,6 +2564,9 @@ def get_map_dashboard() -> str:
       line.className = type;
       line.innerHTML = `<span style="color:#64748b;">[${time}]</span> ${msg}`;
       box.insertBefore(line, box.firstChild);
+
+      const ticker = document.getElementById('dockTicker');
+      if (ticker) ticker.innerHTML = msg.replace(/<[^>]*>?/gm, '').substring(0, 85);
     }
 
     function zoomSector(sector, btn) {
@@ -2513,6 +2620,36 @@ def get_map_dashboard() -> str:
       }
     }
 
+    
+    // Layer Group Management
+    const layerGroups = {
+      AIS: L.layerGroup().addTo(map),
+      CANOES: L.layerGroup().addTo(map),
+      IEZ: L.layerGroup().addTo(map),
+      TOWERS: L.layerGroup().addTo(map),
+      SAR: L.layerGroup().addTo(map)
+    };
+
+    function toggleLayer(layerKey) {
+      const checkbox = document.getElementById(`layer${layerKey}`);
+      if (!checkbox) return;
+      if (checkbox.checked) {
+        if (!map.hasLayer(layerGroups[layerKey])) map.addLayer(layerGroups[layerKey]);
+      } else {
+        if (map.hasLayer(layerGroups[layerKey])) map.removeLayer(layerGroups[layerKey]);
+      }
+    }
+
+    let activeFocusedSARIncidentId = null;
+
+    function focusSARIncident(incId, lat, lon) {
+      activeFocusedSARIncidentId = incId;
+      refreshSAR();
+      if (lat && lon) {
+        map.flyTo([lat, lon], 10);
+      }
+    }
+
     async function initNationalGhanaBoundaries() {
       // 1. Ghana 6NM Inshore Exclusion Zone (IEZ - Fisheries Act 625)
       const iezPoints = [
@@ -2523,14 +2660,15 @@ def get_map_dashboard() -> str:
         [5.4100, -0.1700], [5.2300, -0.5800], [4.9600, -1.3100], [4.7700, -1.7000],
         [4.6800, -1.9100], [4.6200, -2.0500], [4.9800, -3.0600]
       ];
-      L.polygon(iezPoints, {
+      const iezPoly = L.polygon(iezPoints, {
         color: '#0284c7',
         weight: 1.5,
         opacity: 0.8,
         fillColor: '#0284c7',
         fillOpacity: 0.04,
         dashArray: '6, 6'
-      }).addTo(map).bindPopup('<b>Ghana 6NM Inshore Exclusion Zone (IEZ)</b><br>Artisanal canoes only. Industrial trawlers strictly prohibited (Fisheries Act 625).');
+      }).bindPopup('<b>Ghana 6NM Inshore Exclusion Zone (IEZ)</b><br>Artisanal canoes only. Industrial trawlers strictly prohibited (Fisheries Act 625).');
+      layerGroups.IEZ.addLayer(iezPoly);
 
       // 2. Render 29 Coastal Cell Towers
       try {
@@ -2542,13 +2680,14 @@ def get_map_dashboard() -> str:
           tData.towers.forEach(t => {
             const isSeaward = t.sector_type === 'SEAWARD';
             const color = isSeaward ? '#06b6d4' : '#64748b';
-            L.circleMarker([t.lat, t.lon], {
+            const tMarker = L.circleMarker([t.lat, t.lon], {
               radius: 4,
               fillColor: color,
               color: '#ffffff',
               weight: 1,
               fillOpacity: 0.9
-            }).addTo(map).bindPopup(`<b>${t.name}</b><br>Sector: ${t.sector_type} (${t.azimuth_deg}&deg;)<br>Region: ${t.region}`);
+            }).bindPopup(`<b>${t.name}</b><br>Sector: ${t.sector_type} (${t.azimuth_deg}&deg;)<br>Region: ${t.region}`);
+            layerGroups.TOWERS.addLayer(tMarker);
           });
         }
       } catch (e) {}
@@ -2623,61 +2762,79 @@ def get_map_dashboard() -> str:
         const resp = await fetch('/v1/sar/incidents');
         if (resp.ok) {
           const data = await resp.json();
-          if (data.incidents.length === 0) {
-            document.getElementById('activeSARBox').innerHTML = '<div style="color:var(--text-faint);">No active missing boat incidents. Coast is clear.</div>';
+          const activeIncidents = data.incidents.filter(i => i.status === 'ACTIVE');
+
+          if (activeIncidents.length === 0) {
+            document.getElementById('activeSARBox').innerHTML = '<div style="color:var(--text-faint);padding:6px 0;">No active missing boat incidents. Coast is clear.</div>';
+            layerGroups.SAR.clearLayers();
             return;
           }
 
-          const html = data.incidents.map(inc => {
-            const datum = inc.projected_datum;
-            if (!sarMarkers[inc.incident_id]) {
-              const marker = L.circleMarker([datum.lat, datum.lon], {
-                radius: 8,
-                fillColor: '#dc2626',
-                color: '#fff',
-                weight: 2,
-                fillOpacity: 0.95
-              }).addTo(map).bindPopup(`<b>MISSING CANOE: ${inc.canoe_name}</b><br>Owner: ${inc.phone_number}<br>Beach: ${inc.landing_beach}<br><b>Guinea Current Datum: [${datum.lat.toFixed(4)}, ${datum.lon.toFixed(4)}]</b><br>Drifted ${inc.drift_distance_nm} NM Eastward<br>Search Radius: ${inc.search_radius_nm} NM`);
+          // If no incident is focused yet, focus the first one
+          if (!activeFocusedSARIncidentId || !activeIncidents.find(i => i.incident_id === activeFocusedSARIncidentId)) {
+            activeFocusedSARIncidentId = activeIncidents[0].incident_id;
+          }
 
+          // Clear previous SAR layer group to eliminate overlapping clutter
+          layerGroups.SAR.clearLayers();
+
+          const html = activeIncidents.map(inc => {
+            const datum = inc.projected_datum;
+            const isFocused = inc.incident_id === activeFocusedSARIncidentId;
+
+            // 1. Neat, compact marker for every active incident
+            const marker = L.circleMarker([datum.lat, datum.lon], {
+              radius: isFocused ? 9 : 6,
+              fillColor: '#dc2626',
+              color: isFocused ? '#fbbf24' : '#ffffff',
+              weight: isFocused ? 3 : 1.5,
+              fillOpacity: 0.95
+            }).bindPopup(`<b>MISSING CANOE: ${inc.canoe_name}</b><br>Owner: ${inc.phone_number}<br>Beach: ${inc.landing_beach}<br><b>Guinea Current Datum: [${datum.lat.toFixed(4)}, ${datum.lon.toFixed(4)}]</b><br>Drifted ${inc.drift_distance_nm} NM Eastward<br>Search Radius: ${inc.search_radius_nm} NM`);
+            
+            layerGroups.SAR.addLayer(marker);
+
+            // 2. Only draw expanding circle and drift vector for the FOCUSED incident
+            if (isFocused) {
               const circle = L.circle([datum.lat, datum.lon], {
                 radius: inc.search_radius_nm * 1852,
                 color: '#ef4444',
                 fillColor: '#dc2626',
                 fillOpacity: 0.12,
                 dashArray: '5, 5'
-              }).addTo(map);
+              });
+              layerGroups.SAR.addLayer(circle);
 
-              let driftLine = null;
               if (inc.last_known_fix && inc.last_known_fix.lat) {
-                driftLine = L.polyline([
+                const driftLine = L.polyline([
                   [inc.last_known_fix.lat, inc.last_known_fix.lon],
                   [datum.lat, datum.lon]
-                ], { color: '#f59e0b', weight: 2, dashArray: '6, 6' }).addTo(map).bindPopup(`<b>Guinea Current Drift Track</b><br>${inc.canoe_name} carried ${inc.drift_distance_nm} NM Eastward towards Togo`);
+                ], { color: '#f59e0b', weight: 2, dashArray: '6, 6' }).bindPopup(`<b>Guinea Current Drift Track</b><br>${inc.canoe_name} carried ${inc.drift_distance_nm} NM Eastward towards Togo`);
+                layerGroups.SAR.addLayer(driftLine);
               }
-              sarMarkers[inc.incident_id] = { marker, circle, driftLine };
             }
 
             return `
-              <div style="border-bottom:1px solid rgba(255,255,255,0.08);padding:6px 0;display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                  <strong style="color:#f87171;">🚨 ${inc.canoe_name}</strong> <span style="font-size:0.68rem;color:var(--text-faint);">(${inc.landing_beach})</span><br>
-                  <span style="font-size:0.66rem;color:#fbbf24;">Datum: [${datum.lat.toFixed(3)}, ${datum.lon.toFixed(3)}] &bull; ${inc.drift_distance_nm} NM adrift</span>
+              <div style="border-bottom:1px solid rgba(255,255,255,0.08);padding:6px 4px;display:flex;justify-content:space-between;align-items:center;background:${isFocused ? 'rgba(239,68,68,0.12)' : 'transparent'};border-radius:4px;margin-bottom:2px;">
+                <div style="cursor:pointer;" onclick="focusSARIncident('${inc.incident_id}', ${datum.lat}, ${datum.lon})">
+                  <strong style="color:${isFocused ? '#fbbf24' : '#f87171'};font-size:0.75rem;">🚨 ${inc.canoe_name}</strong> <span style="font-size:0.68rem;color:var(--text-faint);">(${inc.landing_beach})</span><br>
+                  <span style="font-size:0.66rem;color:#cbd5e1;">Datum: [${datum.lat.toFixed(3)}, ${datum.lon.toFixed(3)}] &bull; ${inc.drift_distance_nm} NM east</span>
                 </div>
-                <button class="btn btn-sm btn-emerald" style="padding:2px 8px;" onclick="resolveSAR('${inc.incident_id}')">Found</button>
+                <div style="display:flex;gap:4px;">
+                  <button class="btn btn-sm" style="padding:2px 6px;background:${isFocused ? '#f59e0b' : '#334155'};color:#fff;" onclick="focusSARIncident('${inc.incident_id}', ${datum.lat}, ${datum.lon})">${isFocused ? 'Focused' : 'View'}</button>
+                  <button class="btn btn-sm btn-emerald" style="padding:2px 6px;" onclick="resolveSAR('${inc.incident_id}')">Found</button>
+                </div>
               </div>
             `;
           }).join('');
+
           document.getElementById('activeSARBox').innerHTML = html;
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error('refreshSAR error:', e);
+      }
     }
 
     
-    
-    let sdrDroneMarker = null;
-    let sdrTargetMarker = null;
-    let sdrBeamCone = null;
-
     async function executeSDRScan() {
       const phone = document.getElementById('sdrPhoneInput').value.trim() || '0243875318';
       const station = document.getElementById('sdrStationSelect').value;
@@ -2810,7 +2967,7 @@ def get_map_dashboard() -> str:
             badge.style.color = '#10b981';
             badge.style.borderColor = '#10b981';
             badge.innerText = '🟢 RINGING_ALIVE (SIP 180)';
-            summary.innerHTML = '<strong>' + pr.carrier_name + '</strong> &bull; Handset connected to cell tower. Ring-and-drop canceled in ' + pr.latency_ms + 'ms. ';
+            summary.innerHTML = '<strong>' + pr.carrier_name + '</strong> &bull; Handset connected to cell tower. Ring-and-drop canceled in ' + pr.latency_ms + 'ms. Cost: GH₵ 0.00.';
             logEvent('[SIP PROBE] ' + pr.phone_number + ' on ' + pr.carrier_name + ': ACTIVE. 0-second ring-and-drop successful.', 'event-lbs');
           } else if (pr.status === 'IMPLICIT_DETACH_ABSENT') {
             badge.style.background = 'rgba(239,68,68,0.2)';
@@ -2865,9 +3022,11 @@ def get_map_dashboard() -> str:
               vesselMarkers[v.entity_id].setIcon(createVesselIcon(isCanoe, v.status, v.heading_deg));
               vesselMarkers[v.entity_id].setPopupContent(popupHtml);
             } else {
+              const targetGroup = isCanoe ? layerGroups.CANOES : layerGroups.AIS;
               const marker = L.marker(pt, {
                 icon: createVesselIcon(isCanoe, v.status, v.heading_deg)
-              }).addTo(map);
+              });
+              targetGroup.addLayer(marker);
               marker.bindPopup(popupHtml);
               vesselMarkers[v.entity_id] = marker;
             }
@@ -2910,6 +3069,8 @@ def get_map_dashboard() -> str:
     setInterval(pollRadar, 3000);
     setInterval(refreshRoster, 5000);
     setInterval(refreshSAR, 6000);
+
+    
 
     async function locateCanoeRealtime() {
       const input = document.getElementById('locateInput').value.trim();
