@@ -1454,7 +1454,7 @@ def get_mobile_launch_page() -> str:
     <div class="header">
       <span class="badge">GHANA MARITIME AUTHORITY</span>
       <div class="title">🇬🇭 ARTISANAL BEACH LAUNCH</div>
-      <div class="subtitle">Live Handset GPS Departure Tracker (Zero-Install)</div>
+      <div class="subtitle">Ghana Maritime Authority • Artisanal Vessel Departure Portal</div>
     </div>
 
     <div class="card">
@@ -2150,7 +2150,7 @@ def get_map_dashboard() -> str:
       <div>
         <div class="brand-title">
           <span>GH-MARSAR</span>
-          <span class="brand-badge">VTS C4ISR RADAR</span>
+          <span class="brand-badge">COASTAL VTS RADAR</span>
           <span class="live-dot" title="Network Connected"></span>
         </div>
         <div style="font-size:0.65rem;color:var(--text-faint);letter-spacing:0.02em;">
@@ -2167,11 +2167,11 @@ def get_map_dashboard() -> str:
       </div>
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">GUINEA CURRENT:</span>
-        <span class="telemetry-val" style="color:var(--accent-amber);">0.85 m/s &bull; 090&deg; E</span>
+        <span id="telemetryCurrent" class="telemetry-val" style="color:var(--accent-amber);">0.85 m/s &bull; 090&deg; E</span>
       </div>
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">BTS MESH:</span>
-        <span class="telemetry-val" style="color:var(--accent-emerald);">29 Towers Active</span>
+        <span id="telemetryTowers" class="telemetry-val" style="color:var(--accent-emerald);">29 Towers Active</span>
       </div>
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">LIVE AIS:</span>
@@ -2212,11 +2212,11 @@ def get_map_dashboard() -> str:
     <!-- Navigation Tabs for Tactical Deck -->
     <div class="deck-tabs">
       <button class="tab-btn active" onclick="switchDeckTab('LOCATE', this)">🛰️ LOCATOR</button>
-      <button class="tab-btn" onclick="switchDeckTab('PROBE', this)">⚡ ZERO-COST PROBE</button>
-      <button class="tab-btn" onclick="switchDeckTab('SDR', this)">📡 SDR PHONE FINDER</button>
+      <button class="tab-btn" onclick="switchDeckTab('PROBE', this)">⚡ RADIO PROBE</button>
+      <button class="tab-btn" onclick="switchDeckTab('SDR', this)">📡 SDR DIRECTION FINDER</button>
       <button class="tab-btn" onclick="switchDeckTab('SAR', this)">🚨 SAR HOTLINE</button>
       <button class="tab-btn" onclick="switchDeckTab('ROSTER', this)">🛶 FLEET</button>
-      <button class="tab-btn" onclick="switchDeckTab('OPS', this)">⚡ OPS &amp; AIS</button>
+      <button class="tab-btn" onclick="switchDeckTab('OPS', this)">⚙️ OPERATIONS</button>
     </div>
 
     <div class="deck-content">
@@ -2225,7 +2225,7 @@ def get_map_dashboard() -> str:
         <div class="card" style="border-color:rgba(56,189,248,0.3);background:rgba(8,20,38,0.7);">
           <h3 style="color:var(--accent-cyan);">
             <span>🛰️ Real-Time GSM Locator</span>
-            <span style="font-size:0.62rem;background:#0284c7;color:#fff;padding:2px 5px;border-radius:3px;">ZERO-APP</span>
+            
           </h3>
           <p style="font-size:0.71rem;color:var(--text-muted);line-height:1.4;margin:4px 0 8px 0;">
             Pinpoint feature phones instantly via silent radio paging. Verifies if a canoe is missing at sea or safely landed at another beach (e.g. <strong>Keta &rarr; Vodza</strong>).
@@ -2236,10 +2236,7 @@ def get_map_dashboard() -> str:
             <button class="btn btn-sm" onclick="locateCanoeRealtime()" style="white-space:nowrap;">🔍 LOCATE</button>
           </div>
           
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
-            <button class="btn btn-sm btn-emerald" onclick="simulateKetaToVodza()">🚤 Relocate to Vodza (Sell Fish)</button>
-            <button class="btn btn-sm" style="background:#334155;" onclick="simulateReturnToKeta()">🏖️ Return to Keta Beach</button>
-          </div>
+
 
           <div id="locateResultBox" style="font-size:0.72rem;line-height:1.4;background:#050914;border:1px solid #1e293b;border-radius:6px;padding:8px;display:none;"></div>
         </div>
@@ -2253,11 +2250,11 @@ def get_map_dashboard() -> str:
       <div id="tabContentSDR" style="display:none;">
         <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:12px;margin-bottom:10px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <strong style="color:var(--accent-cyan);font-size:0.75rem;">📡 EXTERNAL SDR PHONE FINDER</strong>
-            <span class="badge" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid #38bdf8;">NO LINK NEEDED</span>
+            <strong style="color:var(--accent-cyan);font-size:0.75rem;">📡 SDR DIRECTION FINDER</strong>
+            <span class="badge" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid #38bdf8;">RF UPLINK</span>
           </div>
           <p style="font-size:0.70rem;color:var(--text-muted);line-height:1.35;margin-bottom:8px;">
-            Locates basic feature phones & smartphones <em>in pockets at sea</em> without clicking links, apps, or data connection. Search drone or coastal mast captures <strong>3GPP RACH RF Uplink pulses</strong> via Time-of-Flight & Angle-of-Arrival.
+            Tactical RF direction finding. Intersects <strong>3GPP RACH Uplink pulses</strong> across airborne UAVs and coastal masts using Time-of-Flight (ToF) and Angle-of-Arrival (AoA).
           </p>
 
           <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;">
@@ -2271,8 +2268,8 @@ def get_map_dashboard() -> str:
             </div>
             
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-              <button class="btn btn-sm btn-emerald" onclick="executeSDRScan()">🚀 SCAN POCKET PHONE (RF)</button>
-              <button class="btn btn-sm" style="background:#0284c7;color:#fff;" onclick="executeSDRTriangulate()">📐 TRIANGULATE FIX</button>
+              <button class="btn btn-sm btn-emerald" onclick="executeSDRScan()">🚀 SCAN TARGET RF PULSE</button>
+              <button class="btn btn-sm" style="background:#0284c7;color:#fff;" onclick="executeSDRTriangulate()">📐 MULTI-STATION BEARING FIX</button>
             </div>
           </div>
 
@@ -2291,10 +2288,10 @@ def get_map_dashboard() -> str:
         <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:12px;margin-bottom:10px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
             <strong style="color:var(--accent-cyan);font-size:0.75rem;">⚡ SELF-HOSTED SILENT RADIO PROBE</strong>
-            <span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid #10b981;">ZERO PAID APIS</span>
+            <span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid #10b981;">3GPP SIP</span>
           </div>
           <p style="font-size:0.68rem;color:var(--text-faint);margin:0 0 10px 0;line-height:1.3;">
-            Sub-second SIP Ring-and-Drop signaling. Probes cell tower status without ringing user or billing money (Cost: GH₵ 0.00). If phone drowned, watchdog auto-calculates Guinea Current drift!
+            Sub-second SIP Ring-and-Drop signaling. Probes cell tower status without ringing user or billing money . If phone drowned, watchdog auto-calculates Guinea Current drift!
           </p>
           <div style="display:flex;gap:6px;margin-bottom:8px;">
             <input type="text" id="probePhoneInput" value="+233240003344" placeholder="Phone e.g. 0243875318" style="flex:1;background:rgba(3,7,18,0.8);border:1px solid rgba(255,255,255,0.15);border-radius:4px;color:#fff;padding:6px 10px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
@@ -2310,7 +2307,7 @@ def get_map_dashboard() -> str:
         <div id="probeResultBox" style="display:none;background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:10px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
             <span id="probeStatusBadge" class="badge" style="font-size:0.7rem;">PROBE ACTIVE</span>
-            <span style="font-family:'JetBrains Mono',monospace;font-size:0.68rem;color:#10b981;">Billing: GH₵ 0.00</span>
+            
           </div>
           <div id="probeSummaryText" style="font-size:0.72rem;color:var(--text-light);margin-bottom:6px;"></div>
           <div style="font-size:0.65rem;color:var(--text-faint);margin-bottom:4px;font-weight:700;">SIP SIGNALING PROTOCOL TRACE (SUB-SECOND):</div>
@@ -2353,7 +2350,7 @@ def get_map_dashboard() -> str:
         <div class="card">
           <h3>
             <span>Enroll Canoe</span>
-            <span style="font-size:0.62rem;background:#059669;color:#fff;padding:2px 5px;border-radius:3px;">ONE-TIME</span>
+            
           </h3>
           <div style="display:flex;flex-direction:column;gap:6px;font-size:0.74rem;">
             <input id="regPhone" type="text" placeholder="Mobile Number (e.g. 0244123456)" />
@@ -2387,14 +2384,11 @@ def get_map_dashboard() -> str:
           </div>
         </div>
 
-        <!-- Operational Triggers -->
+        <!-- Operational Maintenance -->
         <div class="card">
-          <h3>Operational Field Actions</h3>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-            <button class="btn btn-sm btn-danger" onclick="simulateKeypadSOS()">Trigger Keypad SOS (*920*44#)</button>
-            <button class="btn btn-sm" style="background:#0891b2;" onclick="injectAISVessel()">Inject AIS Tanker (Tema VHF)</button>
-            <button class="btn btn-sm btn-emerald" onclick="simulateSeawardTrip()">Simulate Seaward Launch</button>
-            <button class="btn btn-sm" style="background:#334155;" onclick="clearRadar()">Clear Test Radar Marks</button>
+          <h3>Operations &amp; Radar Maintenance</h3>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <button class="btn btn-sm" style="background:#334155;" onclick="clearRadar()">🧹 Clear Ephemeral Radar Marks</button>
           </div>
         </div>
       </div>
@@ -2543,6 +2537,8 @@ def get_map_dashboard() -> str:
         const tResp = await fetch('/v1/telecom/towers');
         if (tResp.ok) {
           const tData = await tResp.json();
+          const twBadge = document.getElementById('telemetryTowers');
+          if (twBadge && tData.towers) twBadge.innerText = `${tData.towers.length} Towers Active`;
           tData.towers.forEach(t => {
             const isSeaward = t.sector_type === 'SEAWARD';
             const color = isSeaward ? '#06b6d4' : '#64748b';
@@ -2814,7 +2810,7 @@ def get_map_dashboard() -> str:
             badge.style.color = '#10b981';
             badge.style.borderColor = '#10b981';
             badge.innerText = '🟢 RINGING_ALIVE (SIP 180)';
-            summary.innerHTML = '<strong>' + pr.carrier_name + '</strong> &bull; Handset connected to cell tower. Ring-and-drop canceled in ' + pr.latency_ms + 'ms. Cost: GH₵ 0.00.';
+            summary.innerHTML = '<strong>' + pr.carrier_name + '</strong> &bull; Handset connected to cell tower. Ring-and-drop canceled in ' + pr.latency_ms + 'ms. ';
             logEvent('[SIP PROBE] ' + pr.phone_number + ' on ' + pr.carrier_name + ': ACTIVE. 0-second ring-and-drop successful.', 'event-lbs');
           } else if (pr.status === 'IMPLICIT_DETACH_ABSENT') {
             badge.style.background = 'rgba(239,68,68,0.2)';
