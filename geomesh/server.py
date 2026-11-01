@@ -28,6 +28,7 @@ from geomesh.telecom import (
     VesselStatus,
     normalize_ghana_phone,
 )
+from geomesh.opencellid import get_opencellid_manager
 from geomesh.probe import ProbeStatus, get_probe_engine
 from geomesh.types import (
     GeofenceAlreadyExistsError,
@@ -50,6 +51,7 @@ telecom_gateway = TelecomPassiveGateway(store=durable_store)
 sar_watchdog = SARWatchdog(durable_store)
 ais_decoder = AISDecoder()
 probe_engine = get_probe_engine()
+opencellid_mgr = get_opencellid_manager()
 
 from geomesh.live_ais import LiveAISStreamClient
 live_ais_client = LiveAISStreamClient(engine=_engine)
@@ -1085,6 +1087,44 @@ def reset_probe_event(req: SilentProbeRequest) -> Dict[str, Any]:
     """Reset subscriber state to normal active baseline."""
     probe_engine.reset_subscriber_state(req.phone_number)
     return execute_silent_probe(req)
+
+
+
+# -------------------------------------------------------------------------
+# OpenCellID Global Cellular Registry & Cell Tower Geolocation Endpoints
+# -------------------------------------------------------------------------
+
+class OpenCellIDSyncRequest(BaseModel):
+    api_token: str
+    mcc: int = 620
+
+
+@app.get("/v1/opencellid/lookup", tags=["OpenCellID Global Cellular Registry"])
+def lookup_opencellid_tower(
+    cell_id: int = Query(...),
+    lac: Optional[int] = Query(None),
+    mnc: Optional[int] = Query(None),
+) -> Dict[str, Any]:
+    """Resolve a raw Cell ID / LAC from carrier signaling into exact GPS coordinates."""
+    tower = opencellid_mgr.lookup(cell_id=cell_id, lac=lac, mnc=mnc)
+    if not tower:
+        raise HTTPException(status_code=404, detail=f"Cell ID {cell_id} not found in OpenCellID Ghana database.")
+    return tower
+
+
+@app.get("/v1/opencellid/stats", tags=["OpenCellID Global Cellular Registry"])
+def get_opencellid_stats() -> Dict[str, Any]:
+    """Return total indexed towers across Ghana (MCC 620)."""
+    return opencellid_mgr.get_stats()
+
+
+@app.post("/v1/opencellid/sync", tags=["OpenCellID Global Cellular Registry"])
+def sync_opencellid_dataset(req: OpenCellIDSyncRequest) -> Dict[str, Any]:
+    """Download and ingest the latest 620.csv.gz extract directly from OpenCellID."""
+    try:
+        return opencellid_mgr.download_and_ingest(api_token=req.api_token, mcc=req.mcc)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to sync OpenCellID: {e}")
 
 
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
