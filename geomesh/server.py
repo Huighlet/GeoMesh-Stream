@@ -1352,13 +1352,15 @@ def get_mobile_launch_page() -> str:
   <title>GH-MARSAR: Beach Departure GPS Tracker</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: #030712;
       color: #f8fafc;
       font-family: 'Inter', sans-serif;
-      padding: 16px;
+      padding: 14px;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -1368,8 +1370,8 @@ def get_mobile_launch_page() -> str:
       background: rgba(15,23,42,0.85);
       border: 1px solid rgba(56,189,248,0.25);
       border-radius: 8px;
-      padding: 14px;
-      margin-bottom: 14px;
+      padding: 12px;
+      margin-bottom: 12px;
       text-align: center;
     }
     .badge {
@@ -1383,46 +1385,49 @@ def get_mobile_launch_page() -> str:
       background: rgba(16,185,129,0.15);
       color: #10b981;
       border: 1px solid #10b981;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }
-    .title { font-size: 1.1rem; font-weight: 800; color: #38bdf8; }
-    .subtitle { font-size: 0.72rem; color: #94a3b8; margin-top: 4px; }
+    .title { font-size: 1.05rem; font-weight: 800; color: #38bdf8; }
+    .subtitle { font-size: 0.70rem; color: #94a3b8; margin-top: 3px; }
     .card {
       background: rgba(15,23,42,0.75);
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 8px;
-      padding: 14px;
-      margin-bottom: 12px;
+      padding: 12px;
+      margin-bottom: 10px;
     }
-    label { font-size: 0.72rem; font-weight: 700; color: #94a3b8; display: block; margin-bottom: 4px; }
+    label { font-size: 0.70rem; font-weight: 700; color: #94a3b8; display: block; margin-bottom: 4px; }
     input, select {
       width: 100%;
       background: rgba(3,7,18,0.9);
       border: 1px solid rgba(255,255,255,0.18);
       border-radius: 6px;
       color: #fff;
-      padding: 10px 12px;
+      padding: 9px 12px;
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.85rem;
-      margin-bottom: 10px;
+      font-size: 0.82rem;
+      margin-bottom: 8px;
     }
     .btn {
       width: 100%;
-      padding: 14px;
+      padding: 12px;
       border: none;
       border-radius: 8px;
       font-weight: 800;
-      font-size: 0.95rem;
-      letter-spacing: 0.04em;
+      font-size: 0.88rem;
+      letter-spacing: 0.03em;
       cursor: pointer;
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 10px;
+      gap: 6px;
+      margin-bottom: 8px;
+      text-decoration: none;
     }
     .btn-green { background: #10b981; color: #022c22; }
     .btn-green:active { background: #059669; }
+    .btn-blue { background: #0284c7; color: #ffffff; }
+    .btn-blue:active { background: #0369a1; }
     .btn-red { background: #ef4444; color: #fff; }
     .btn-red:active { background: #dc2626; }
     .status-box {
@@ -1431,11 +1436,17 @@ def get_mobile_launch_page() -> str:
       border-radius: 6px;
       padding: 10px;
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.7rem;
+      font-size: 0.68rem;
       color: #38bdf8;
-      line-height: 1.5;
+      line-height: 1.45;
     }
-    .footer { font-size: 0.65rem; color: #64748b; text-align: center; margin-top: 10px; }
+    #miniMap {
+      height: 200px;
+      border-radius: 6px;
+      border: 1px solid rgba(56,189,248,0.3);
+      margin-top: 8px;
+    }
+    .footer { font-size: 0.62rem; color: #64748b; text-align: center; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -1465,8 +1476,12 @@ def get_mobile_launch_page() -> str:
         <option value="Axim">Axim Landing Beach (Western)</option>
       </select>
 
+      <button id="snapBtn" class="btn btn-blue" onclick="captureInstantLocation()">
+        <span>📍 1-TAP: SHARE CURRENT LOCATION NOW</span>
+      </button>
+
       <button id="startBtn" class="btn btn-green" onclick="toggleTracking()">
-        <span>🟢 DEPART BEACH (START TRACKING)</span>
+        <span>🟢 DEPART BEACH (LIVE STREAM EVERY 3s)</span>
       </button>
 
       <button id="sosBtn" class="btn btn-red" onclick="triggerSOS()">
@@ -1475,13 +1490,19 @@ def get_mobile_launch_page() -> str:
     </div>
 
     <div class="card">
-      <label>LIVE TRANSMISSION TELEMETRY</label>
+      <label>LIVE TRANSMISSION &amp; SATELLITE RADAR</label>
       <div class="status-box" id="statusDisplay">
         STATUS: READY AT BEACH<br>
-        GPS: WAITING FOR DEPARTURE TAP...<br>
-        PINGS SENT: 0<br>
+        GPS HARDWARE: TAP BUTTON ABOVE TO SHARE FIX...<br>
+        PINGS TRANSMITTED: 0<br>
         RADAR FEED: STANDBY
       </div>
+
+      <div id="miniMap"></div>
+
+      <a id="radarLinkBtn" href="/" target="_blank" class="btn btn-blue" style="display:none;margin-top:10px;">
+        <span>🗺️ VIEW MY CANOE ON NATIONAL COMMAND RADAR</span>
+      </a>
     </div>
   </div>
 
@@ -1498,6 +1519,91 @@ def get_mobile_launch_page() -> str:
     let currentSpeed = 0.0;
     let currentHeading = 0.0;
     let timerId = null;
+    let miniMap = null;
+    let myMarker = null;
+    let accuracyCircle = null;
+
+    // Initialize mini Leaflet map
+    function initMap(lat, lon) {
+      if (miniMap) return;
+      miniMap = L.map('miniMap', { zoomControl: false }).setView([lat, lon], 14);
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 18,
+        attribution: '&copy; Esri &bull; GH-MARSAR'
+      }).addTo(miniMap);
+
+      // Tap on map fallback if GPS permission denied
+      miniMap.on('click', function(e) {
+        currentLat = e.latlng.lat;
+        currentLon = e.latlng.lng;
+        updateMapMarker(currentLat, currentLon, 15.0);
+        sendPing(false, 15.0);
+      });
+    }
+
+    function updateMapMarker(lat, lon, accuracy) {
+      if (!miniMap) initMap(lat, lon);
+      miniMap.setView([lat, lon], Math.max(14, miniMap.getZoom()));
+
+      if (!myMarker) {
+        myMarker = L.circleMarker([lat, lon], {
+          radius: 8,
+          fillColor: '#10b981',
+          color: '#ffffff',
+          weight: 2,
+          fillOpacity: 0.9
+        }).addTo(miniMap).bindPopup('<b>My Canoe Location</b><br>Live Stream Active');
+      } else {
+        myMarker.setLatLng([lat, lon]);
+      }
+
+      if (!accuracyCircle) {
+        accuracyCircle = L.circle([lat, lon], {
+          radius: accuracy || 20,
+          color: '#38bdf8',
+          weight: 1,
+          fillColor: '#38bdf8',
+          fillOpacity: 0.15
+        }).addTo(miniMap);
+      } else {
+        accuracyCircle.setLatLng([lat, lon]);
+        accuracyCircle.setRadius(accuracy || 20);
+      }
+    }
+
+    // 1-Tap Instant Location Capture
+    function captureInstantLocation() {
+      const snapBtn = document.getElementById('snapBtn');
+      snapBtn.innerHTML = '<span>⏳ ACQUIRING GPS FIX...</span>';
+
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            currentLat = pos.coords.latitude;
+            currentLon = pos.coords.longitude;
+            currentSpeed = pos.coords.speed ? (pos.coords.speed * 1.94384) : 0.0;
+            currentHeading = pos.coords.heading || 0.0;
+            const acc = pos.coords.accuracy || 10.0;
+            updateMapMarker(currentLat, currentLon, acc);
+            sendPing(false, acc);
+            snapBtn.innerHTML = '<span>✅ LOCATION BROADCASTED (TAP TO REFRESH)</span>';
+          },
+          err => {
+            console.warn('Geolocation error:', err);
+            // If user denied permission or on insecure HTTP, use current / fallback
+            initMap(currentLat, currentLon);
+            updateMapMarker(currentLat, currentLon, 25.0);
+            sendPing(false, 25.0);
+            snapBtn.innerHTML = '<span>📍 1-TAP: SHARE CURRENT LOCATION NOW</span>';
+            document.getElementById('statusDisplay').innerHTML += '<br><span style="color:#fbbf24;">Note: Browser GPS permission prompt required, or tap map directly.</span>';
+          },
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+        );
+      } else {
+        initMap(currentLat, currentLon);
+        sendPing(false, 20.0);
+      }
+    }
 
     function toggleTracking() {
       const btn = document.getElementById('startBtn');
@@ -1509,7 +1615,7 @@ def get_mobile_launch_page() -> str:
         startGPS();
       } else {
         isTracking = false;
-        btn.innerHTML = '<span>🟢 DEPART BEACH (START TRACKING)</span>';
+        btn.innerHTML = '<span>🟢 DEPART BEACH (LIVE STREAM EVERY 3s)</span>';
         btn.style.background = '#10b981';
         btn.style.color = '#022c22';
         stopGPS();
@@ -1524,23 +1630,23 @@ def get_mobile_launch_page() -> str:
             currentLon = pos.coords.longitude;
             currentSpeed = pos.coords.speed ? (pos.coords.speed * 1.94384) : 2.5;
             currentHeading = pos.coords.heading || 160.0;
-            sendPing(false, pos.coords.accuracy || 4.0);
+            const acc = pos.coords.accuracy || 8.0;
+            updateMapMarker(currentLat, currentLon, acc);
+            sendPing(false, acc);
           },
           err => {
-            console.warn('Geolocation fallback:', err);
-            // Fallback for simulation / testing
-            sendPing(false, 5.0);
+            console.warn('WatchPosition error:', err);
+            sendPing(false, 15.0);
           },
-          { enableHighAccuracy: true, maximumAge: 2000, timeout: 5000 }
+          { enableHighAccuracy: true, maximumAge: 2000, timeout: 6000 }
         );
       } else {
-        sendPing(false, 5.0);
+        sendPing(false, 10.0);
       }
 
-      // Interval fallback ensuring regular 4s transmission
       timerId = setInterval(() => {
-        if (isTracking) sendPing(false, 5.0);
-      }, 4000);
+        if (isTracking) sendPing(false, 10.0);
+      }, 3000);
     }
 
     function stopGPS() {
@@ -1582,14 +1688,17 @@ def get_mobile_launch_page() -> str:
           document.getElementById('statusDisplay').innerHTML = `
             STATUS: 🟢 BROADCASTING LIVE TO GMA RADAR<br>
             CANOE: ${canoe} (${phone})<br>
-            GPS FIX: [${currentLat.toFixed(4)}, ${currentLon.toFixed(4)}] ±${accuracy.toFixed(1)}m<br>
+            GPS FIX: [${currentLat.toFixed(5)}, ${currentLon.toFixed(5)}] &plusmn;${accuracy.toFixed(1)}m<br>
             SPEED: ${currentSpeed.toFixed(1)} knots &bull; HEADING: ${currentHeading.toFixed(0)}&deg;<br>
-            PINGS SENT: ${pingCount}<br>
-            SERVER TIME: ${res.server_time_utc}
+            PINGS SENT: ${pingCount} &bull; SERVER TIME: ${res.server_time_utc}
           `;
+
+          const radarBtn = document.getElementById('radarLinkBtn');
+          radarBtn.href = '/?lat=' + currentLat + '&lon=' + currentLon;
+          radarBtn.style.display = 'block';
         }
       } catch (e) {
-        document.getElementById('statusDisplay').innerHTML += `<br><span style="color:#f87171;">OFFLINE: Fix cached. Will flush on signal.</span>`;
+        document.getElementById('statusDisplay').innerHTML += '<br><span style="color:#f87171;">OFFLINE: Fix cached. Will flush on signal.</span>';
       }
     }
 
@@ -1601,6 +1710,11 @@ def get_mobile_launch_page() -> str:
         Guinea Current Datum Calculated for Rescue Boats!
       `;
     }
+
+    // Auto-initialize map on load
+    window.addEventListener('load', () => {
+      initMap(currentLat, currentLon);
+    });
   </script>
 </body>
 </html>"""
@@ -2332,7 +2446,11 @@ def get_map_dashboard() -> str:
     }
 
     // High-Contrast CartoDB Dark Matter Maritime Basemap
-    const map = L.map('map', { zoomControl: false }).setView([5.30, -0.85], 8);
+    const urlParams = new URLSearchParams(window.location.search);
+    const initialLat = parseFloat(urlParams.get('lat')) || 5.30;
+    const initialLon = parseFloat(urlParams.get('lon')) || -0.85;
+    const initialZoom = urlParams.has('lat') ? 14 : 8;
+    const map = L.map('map', { zoomControl: false }).setView([initialLat, initialLon], initialZoom);
     window.leafletMap = map;
     L.control.zoom({ position: 'topright' }).addTo(map);
 
