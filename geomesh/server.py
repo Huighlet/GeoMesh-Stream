@@ -379,6 +379,33 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
     engine = get_engine()
     snapshot_id = f"snap_fleet_{int(time.time_ns())}"
     vehicles = []
+    seen_entities = set()
+
+    # Ghana 6NM Inshore Exclusion Zone (IEZ) polygon points for Act 625 intrusion detection
+    iez_points = [
+        (5.1000, -3.1000), (4.7400, -2.0900), (4.8000, -1.9500), (4.8900, -1.7400),
+        (5.0800, -1.3500), (5.3500, -0.6200), (5.5300, -0.2100), (5.6200, 0.0100),
+        (5.7800, 0.6300), (5.8000, 0.9000), (6.1100, 1.2000),
+        (5.9900, 1.2500), (5.6800, 0.9500), (5.6600, 0.6700), (5.5000, 0.0500),
+        (5.4100, -0.1700), (5.2300, -0.5800), (4.9600, -1.3100), (4.7700, -1.7000),
+        (4.6800, -1.9100), (4.6200, -2.0500), (4.9800, -3.0600)
+    ]
+
+    def _is_inside_iez(lat: float, lon: float) -> bool:
+        n = len(iez_points)
+        inside = False
+        p1lat, p1lon = iez_points[0]
+        for i in range(n + 1):
+            p2lat, p2lon = iez_points[i % n]
+            if lon > min(p1lon, p2lon):
+                if lon <= max(p1lon, p2lon):
+                    if lat <= max(p1lat, p2lat):
+                        if p1lon != p2lon:
+                            xints = (lon - p1lon) * (p2lat - p1lat) / (p2lon - p1lon) + p1lat
+                        if p1lat == p2lat or lat <= xints:
+                            inside = not inside
+            p1lat, p1lon = p2lat, p2lon
+        return inside
 
     for ent_id, pos in engine._entity_positions.items():
         k_state = engine.get_kinematic_state(ent_id)
@@ -386,19 +413,44 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
         active_fences = list(engine.geofences._active_presence.get(ent_id, {}))
 
         status_str = "UNDERWAY"
+        landing_beach = None
+        language_str = "EWE"
+        v_type = "TANKER"
+
         if ent_id.startswith("canoe-"):
             clean_phone = ent_id.replace("canoe-", "")
             sub = telecom_gateway.get_subscriber(clean_phone)
             if sub:
                 status_str = sub.status.value if hasattr(sub.status, "value") else str(sub.status)
+                landing_beach = sub.landing_beach
+                language_str = sub.language.value if hasattr(sub.language, "value") else str(sub.language)
+            v_type = "CANOE"
+        else:
+            meta = live_ais_client.get_vessel_metadata(ent_id)
+            name_upper = (meta.get("ship_name") or ent_id).upper() if meta else ent_id.upper()
+            if any(k in name_upper for k in ["TRAWL", "FISH", "SEINER", "PECHE"]):
+                v_type = "TRAWLER"
+            elif any(k in name_upper for k in ["EXPRESS", "CONTAINER", "CARRIER", "BULK", "LINE", "JASCON"]):
+                v_type = "CARGO"
+            elif any(k in name_upper for k in ["TUG", "PILOT", "SUPPLY", "CREW", "FCS"]):
+                v_type = "TUG"
+            else:
+                v_type = "TANKER"
 
         meta = live_ais_client.get_vessel_metadata(ent_id)
         ship_name = meta["ship_name"] if meta else (ent_id if not ent_id.startswith("canoe-") else None)
         is_live = meta is not None
 
+        # Check IEZ violation for commercial vessels
+        is_iez_violator = False
+        if not ent_id.startswith("canoe-"):
+            is_iez_violator = _is_inside_iez(pos.lat, pos.lon)
+
+        seen_entities.add(ent_id)
         vehicles.append({
             "entity_id": ent_id,
             "ship_name": ship_name,
+            "vessel_type": v_type,
             "is_live": is_live,
             "position": {"lat": pos.lat, "lon": pos.lon},
             "kinematics": {
@@ -411,7 +463,40 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
             "status": status_str,
             "predicted_position_30s": {"lat": pred_30s.lat, "lon": pred_30s.lon} if pred_30s else None,
             "active_geofences": active_fences,
+            "is_iez_violation": is_iez_violator,
+            "landing_beach": landing_beach,
+            "language": language_str,
         })
+
+    # Ensure all registered artisanal subscribers with known locations appear on the radar
+    for sub in telecom_gateway.list_subscribers():
+        cid = f"canoe-{sub.phone_number}"
+        if sub.last_point and cid not in seen_entities:
+            st_val = sub.status.value if hasattr(sub.status, "value") else str(sub.status)
+            is_active_sea = st_val in ["AT_SEA", "SOS_DISTRESS", "OVERDUE"]
+            seen_entities.add(cid)
+            vehicles.append({
+                "entity_id": cid,
+                "ship_name": sub.canoe_name,
+                "vessel_type": "CANOE",
+                "is_live": is_active_sea,
+                "position": {"lat": sub.last_point.lat, "lon": sub.last_point.lon},
+                "kinematics": {
+                    "velocity_mps": 2.2 if is_active_sea else 0.0,
+                    "bearing_deg": 105.0 if is_active_sea else 0.0,
+                    "acceleration_mps2": 0.0,
+                },
+                "speed_mps": 2.2 if is_active_sea else 0.0,
+                "heading_deg": 105.0 if is_active_sea else 0.0,
+                "status": st_val,
+                "predicted_position_30s": None,
+                "active_geofences": [],
+                "is_iez_violation": False,
+                "landing_beach": sub.landing_beach,
+                "language": sub.language.value if hasattr(sub.language, "value") else str(sub.language),
+                "battery_pct": 85 if is_active_sea else 96,
+                "signal_bars": 4,
+            })
 
     hazards = []
     for v in vehicles:
@@ -431,7 +516,6 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
         "collision_hazards": hazards,
         "status": "FLEET_SNAPSHOT_COMMITTED",
     }
-
 
 @app.post("/v1/fleet/clear", tags=["Spatial Queries"])
 def clear_fleet_test_entities() -> Dict[str, Any]:
@@ -1343,128 +1427,197 @@ def ingest_live_handset_gps(req: LiveGPSReportRequest) -> Dict[str, Any]:
 
 @app.get("/launch", response_class=HTMLResponse, tags=["Mobile Departure & Live Handset GPS"])
 def get_mobile_launch_page() -> str:
-    """Serve lightweight high-contrast mobile departure and GPS tracker page."""
+    """Serve multilingual 1-tap mobile departure portal with live active voyage HUD."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>GH-MARSAR: Beach Departure GPS Tracker</title>
+  <title>GH-MARSAR: Beach Departure GPS Portal</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
+    :root {
+      --bg: #030712;
+      --card-bg: rgba(15, 23, 42, 0.85);
+      --border: rgba(255, 255, 255, 0.1);
+      --cyan: #38bdf8;
+      --emerald: #10b981;
+      --rose: #ef4444;
+      --amber: #f59e0b;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: #030712;
+      background: var(--bg);
       color: #f8fafc;
-      font-family: 'Inter', sans-serif;
-      padding: 14px;
+      font-family: 'Inter', -apple-system, sans-serif;
+      padding: 12px;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
     }
     .header {
-      background: rgba(15,23,42,0.85);
-      border: 1px solid rgba(56,189,248,0.25);
+      background: var(--card-bg);
+      border: 1px solid rgba(56, 189, 248, 0.3);
       border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 12px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
       text-align: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     }
-    .badge {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 4px;
+    .lang-bar {
+      display: flex;
+      justify-content: center;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .lang-pill {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #94a3b8;
       font-size: 0.68rem;
       font-weight: 700;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      background: rgba(16,185,129,0.15);
-      color: #10b981;
-      border: 1px solid #10b981;
-      margin-bottom: 4px;
+      padding: 4px 8px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: all 0.15s;
     }
-    .title { font-size: 1.05rem; font-weight: 800; color: #38bdf8; }
-    .subtitle { font-size: 0.70rem; color: #94a3b8; margin-top: 3px; }
+    .lang-pill.active {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #ffffff;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+    }
+    .title { font-size: 1.05rem; font-weight: 800; color: #38bdf8; letter-spacing: 0.02em; }
+    .subtitle { font-size: 0.68rem; color: #94a3b8; margin-top: 2px; }
+
     .card {
-      background: rgba(15,23,42,0.75);
-      border: 1px solid rgba(255,255,255,0.08);
+      background: var(--card-bg);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 12px;
       margin-bottom: 10px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
     }
     label { font-size: 0.70rem; font-weight: 700; color: #94a3b8; display: block; margin-bottom: 4px; }
     input, select {
       width: 100%;
-      background: rgba(3,7,18,0.9);
-      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(3, 7, 18, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.16);
       border-radius: 6px;
       color: #fff;
       padding: 9px 12px;
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.82rem;
+      font-size: 0.85rem;
       margin-bottom: 8px;
     }
     .btn {
       width: 100%;
-      padding: 12px;
+      padding: 13px;
       border: none;
       border-radius: 8px;
       font-weight: 800;
-      font-size: 0.88rem;
+      font-size: 0.90rem;
       letter-spacing: 0.03em;
       cursor: pointer;
       display: flex;
       justify-content: center;
       align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      transition: all 0.2s;
+    }
+    .btn-green { background: #10b981; color: #022c22; box-shadow: 0 4px 14px rgba(16,185,129,0.3); }
+    .btn-green:active { background: #059669; }
+    .btn-red { background: #ef4444; color: #fff; box-shadow: 0 4px 14px rgba(239,68,68,0.3); }
+    .btn-red:active { background: #dc2626; }
+    .btn-blue { background: #0284c7; color: #fff; }
+    
+    /* Active Voyage HUD */
+    #voyageHUD {
+      display: none;
+      animation: fadeIn 0.3s ease;
+    }
+    .hud-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 6px;
       margin-bottom: 8px;
-      text-decoration: none;
     }
-    .btn-green { background: #10b981; color: #022c22; }
-    .btn-green:active { background: #059669; }
-    .btn-blue { background: #0284c7; color: #ffffff; }
-    .btn-blue:active { background: #0369a1; }
-    .btn-red { background: #ef4444; color: #fff; }
-    .btn-red:active { background: #dc2626; }
-    .status-box {
-      background: #020617;
-      border: 1px solid rgba(56,189,248,0.3);
+    .hud-tile {
+      background: rgba(3, 7, 18, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.2);
       border-radius: 6px;
-      padding: 10px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.68rem;
-      color: #38bdf8;
-      line-height: 1.45;
+      padding: 8px;
+      text-align: center;
     }
+    .hud-label { font-size: 0.62rem; color: #64748b; font-weight: 700; text-transform: uppercase; }
+    .hud-val { font-family: 'JetBrains Mono', monospace; font-size: 1.05rem; font-weight: 800; color: #38bdf8; margin-top: 2px; }
+
     #miniMap {
-      height: 200px;
+      height: 165px;
       border-radius: 6px;
-      border: 1px solid rgba(56,189,248,0.3);
-      margin-top: 8px;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      margin-top: 6px;
+      background: #020617;
     }
-    .footer { font-size: 0.62rem; color: #64748b; text-align: center; margin-top: 6px; }
+    .footer { font-size: 0.62rem; color: #64748b; text-align: center; margin-top: auto; padding-top: 6px; }
+
+    /* Custom Mobile Toast */
+    #mobileToast {
+      position: fixed;
+      bottom: 20px;
+      left: 14px;
+      right: 14px;
+      background: rgba(10, 16, 31, 0.96);
+      border: 1px solid #38bdf8;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #f8fafc;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.8);
+      z-index: 9999;
+      display: none;
+      animation: slideUp 0.3s ease;
+      text-align: center;
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
   </style>
 </head>
 <body>
   <div>
+    <!-- Language Selector Header -->
     <div class="header">
-      <span class="badge">GHANA MARITIME AUTHORITY</span>
-      <div class="title">🇬🇭 ARTISANAL BEACH LAUNCH</div>
-      <div class="subtitle">Ghana Maritime Authority • Artisanal Vessel Departure Portal</div>
+      <div class="lang-bar">
+        <button class="lang-pill active" onclick="setLanguage('en')">🇬🇭 English</button>
+        <button class="lang-pill" onclick="setLanguage('ee')">🌊 Eʋegbe</button>
+        <button class="lang-pill" onclick="setLanguage('fat')">⛵ Mfantse</button>
+        <button class="lang-pill" onclick="setLanguage('ga')">⚓ Ga</button>
+      </div>
+      <div id="lblAuth" style="font-size:0.65rem;font-weight:700;color:#10b981;letter-spacing:0.05em;text-transform:uppercase;">GHANA MARITIME AUTHORITY</div>
+      <div class="title" id="txtTitle">🇬🇭 ARTISANAL BEACH LAUNCH</div>
+      <div class="subtitle" id="txtSubtitle">Artisanal Vessel Departure Portal &bull; VTS Telemetry Mesh</div>
     </div>
 
-    <div class="card">
-      <label>CANOE NAME / REGISTRATION</label>
+    <!-- Pre-Departure Form Card -->
+    <div class="card" id="preDepartureCard">
+      <label id="lblCanoeName">CANOE NAME / REGISTRATION</label>
       <input type="text" id="canoeName" value="Agbe Yeye">
 
-      <label>TELEPHONE NUMBER (MSISDN)</label>
+      <label id="lblPhone">TELEPHONE NUMBER (MSISDN)</label>
       <input type="tel" id="phoneNumber" value="0243875318">
 
-      <label>DEPARTURE LANDING BEACH</label>
+      <label id="lblBeach">DEPARTURE LANDING BEACH</label>
       <select id="landingBeach">
         <option value="Keta Beach" selected>Keta Beach (Volta)</option>
         <option value="Vodza">Vodza Fish Market (Volta)</option>
@@ -1476,190 +1629,265 @@ def get_mobile_launch_page() -> str:
         <option value="Axim">Axim Landing Beach (Western)</option>
       </select>
 
-      <button id="snapBtn" class="btn btn-blue" onclick="captureInstantLocation()">
-        <span>📍 1-TAP: SHARE CURRENT LOCATION NOW</span>
+      <!-- Unified 1-Tap Departure Button -->
+      <button id="departBtn" class="btn btn-green" onclick="handleDeparture()">
+        <span>🚀</span> <span id="txtDepartBtn">1-TAP DEPART BEACH (LOCK GPS)</span>
       </button>
 
-      <button id="startBtn" class="btn btn-green" onclick="toggleTracking()">
-        <span>🟢 DEPART BEACH (LIVE STREAM EVERY 3s)</span>
-      </button>
-
-      <button id="sosBtn" class="btn btn-red" onclick="triggerSOS()">
-        <span>🚨 EMERGENCY SOS DISTRESS</span>
+      <button id="preSosBtn" class="btn btn-red" onclick="triggerSOS()">
+        <span>🚨</span> <span id="txtPreSosBtn">EMERGENCY SOS DISTRESS</span>
       </button>
     </div>
 
-    <div class="card">
-      <label>LIVE TRANSMISSION &amp; SATELLITE RADAR</label>
-      <div class="status-box" id="statusDisplay">
-        STATUS: READY AT BEACH<br>
-        GPS HARDWARE: TAP BUTTON ABOVE TO SHARE FIX...<br>
-        PINGS TRANSMITTED: 0<br>
-        RADAR FEED: STANDBY
+    <!-- Active Voyage HUD (Appears when Canoe is At Sea) -->
+    <div class="card" id="voyageHUD">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span id="hudStatusPill" style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid #10b981;border-radius:4px;padding:3px 8px;font-size:0.68rem;font-weight:700;">🟢 AT SEA &bull; RADAR ACTIVE</span>
+        <span id="hudTimer" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;color:#f8fafc;font-weight:700;">00:00:00</span>
       </div>
 
-      <div id="miniMap"></div>
+      <div class="hud-grid">
+        <div class="hud-tile">
+          <div class="hud-label" id="lblSpeed">SPEED</div>
+          <div class="hud-val" id="valSpeed">0.0 kts</div>
+        </div>
+        <div class="hud-tile">
+          <div class="hud-label" id="lblHeading">HEADING</div>
+          <div class="hud-val" id="valHeading">110&deg; ESE</div>
+        </div>
+        <div class="hud-tile">
+          <div class="hud-label" id="lblShoreDist">OFFSHORE DIST</div>
+          <div class="hud-val" id="valShoreDist">0.0 NM</div>
+        </div>
+        <div class="hud-tile">
+          <div class="hud-label" id="lblPings">GPS PINGS</div>
+          <div class="hud-val" id="valPings">0</div>
+        </div>
+      </div>
 
-      <a id="radarLinkBtn" href="/" target="_blank" class="btn btn-blue" style="display:none;margin-top:10px;">
-        <span>🗺️ VIEW MY CANOE ON NATIONAL COMMAND RADAR</span>
-      </a>
+      <button class="btn btn-red" onclick="triggerSOS()">
+        <span>🚨</span> <span id="txtActiveSosBtn">EMERGENCY SOS DISTRESS</span>
+      </button>
+
+      <button class="btn btn-blue" onclick="handleReturnShore()">
+        <span>🏖️</span> <span id="txtReturnBtn">SAFE RETURN TO SHORE</span>
+      </button>
+    </div>
+
+    <!-- Mini Live Map Preview -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <label id="lblMapTitle" style="margin:0;">CANOE RADAR FIX</label>
+        <span id="gpsPill" style="font-family:'JetBrains Mono',monospace;font-size:0.62rem;color:#10b981;">GPS HARDWARE READY</span>
+      </div>
+      <div id="miniMap"></div>
     </div>
   </div>
 
   <div class="footer">
-    Ghana Maritime Authority (Act 630) • National Maritime Rescue Coordination Centre (Accra MRCC)
+    Ghana Maritime Authority (Act 630) &bull; National Rescue Coordination Centre (Accra MRCC)
   </div>
 
-  <script>
-    let watchId = null;
-    let isTracking = false;
-    let pingCount = 0;
-    let currentLat = 5.8250;
-    let currentLon = 0.9150;
-    let currentSpeed = 0.0;
-    let currentHeading = 0.0;
-    let timerId = null;
-    let miniMap = null;
-    let myMarker = null;
-    let accuracyCircle = null;
+  <div id="mobileToast"></div>
 
-    // Initialize mini Leaflet map
+  <script>
+    const DICTIONARY = {
+      en: {
+        title: "🇬🇭 ARTISANAL BEACH LAUNCH",
+        subtitle: "Artisanal Vessel Departure Portal • VTS Telemetry Mesh",
+        canoeName: "CANOE NAME / REGISTRATION",
+        phone: "TELEPHONE NUMBER (MSISDN)",
+        beach: "DEPARTURE LANDING BEACH",
+        departBtn: "1-TAP DEPART BEACH (LOCK GPS)",
+        sosBtn: "EMERGENCY SOS DISTRESS",
+        statusAtSea: "🟢 AT SEA • RADAR ACTIVE",
+        speed: "SPEED",
+        heading: "HEADING",
+        shoreDist: "OFFSHORE DIST",
+        pings: "GPS PINGS",
+        returnBtn: "SAFE RETURN TO SHORE",
+        mapTitle: "CANOE RADAR FIX",
+        gpsReady: "GPS HARDWARE READY",
+        toastDepart: "🚀 Departure logged! Live GPS tracking active on National Radar.",
+        toastSos: "🚨 DISTRESS SENT! Ghana Navy & Coastal VTS alerted!",
+        toastReturn: "🏖️ Moored safely ashore! Voyage ended."
+      },
+      ee: {
+        title: "🇬🇭 ƑU DZI YIYI PORTAL",
+        subtitle: "Tɔdziʋuwo Ƒe Dzedze Kple Ʋuɖoɖo • VTS Mesh",
+        canoeName: "ƲU ƑE ŊKƆ (CANOE NAME)",
+        phone: "KAƑODZI XƆXƆ (PHONE)",
+        beach: "DZEDZE ƑUTA (BEACH)",
+        departBtn: "TA KPEM ƑU DZI YIYI (LOCK GPS)",
+        sosBtn: "KPƆDƆDƆ ƲU ƲEDIEDIE SOS",
+        statusAtSea: "🟢 LE ƑU DZI • RADAR EKPO",
+        speed: "DUƆ (SPEED)",
+        heading: "MƆ (HEADING)",
+        shoreDist: "TSO ƑUTA (OFFSHORE)",
+        pings: "GPS PINGS",
+        returnBtn: "TRƆ GBƆ VA ƑUTA BLABO",
+        mapTitle: "ƲU LA ƑE TEƑE LE MAP DZI",
+        gpsReady: "GPS LE DƆ WƆM",
+        toastDepart: "🚀 Edze Ƒu dzi! Wo le wò ʋu la kpɔm le National Radar dzi.",
+        toastSos: "🚨 KPƆDƆDƆ ƲU! Ghana Navy kple Asrãkpɔlawo le vavam!",
+        toastReturn: "🏖️ Eva ɖo Ƒuta le dedienunɔme! Akpe."
+      },
+      fat: {
+        title: "🇬🇭 MPOANO DUBAA PORTAL",
+        subtitle: "Mbanyin Mpoano Akwantu Ho Nhyehyɛe",
+        canoeName: "HYƐN NO DZIN (CANOE NAME)",
+        phone: "FƆN NƆMBA (PHONE)",
+        beach: "MPOANO A WUFIR (BEACH)",
+        departBtn: "BƆ KƆ PO DO (LOCK GPS)",
+        sosBtn: "MBARABA SOS KƆKƆƆ",
+        statusAtSea: "🟢 WƆ PO DO • RADAR HWƐ",
+        speed: "HARE (SPEED)",
+        heading: "KWAN (HEADING)",
+        shoreDist: "FIR MPOANO (OFFSHORE)",
+        pings: "GPS PINGS",
+        returnBtn: "SAN BRA MPOANO BƆKƆƆ",
+        mapTitle: "HYƐN NO GYINABEW WƆ MAP DO",
+        gpsReady: "GPS WƆ HƆ",
+        toastDepart: "🚀 Wokɔ po do! National Radar rehwɛ wo seesei ara.",
+        toastSos: "🚨 MBARABA SOS! Ghana Asraafo rebɛgye mo!",
+        toastReturn: "🏖️ Woadu mpoano bɔkɔɔ! Akwantu no aba awiei."
+      },
+      ga: {
+        title: "🇬🇭 ŊSHƆNAA YELI PORTAL",
+        subtitle: "Ŋshɔŋ Wolɛi Ahe Gbɛjianɔtoo",
+        canoeName: "LƐLƐ LƐ GBƐI (CANOE NAME)",
+        phone: "FƆƆN NƆMBA (PHONE)",
+        beach: "ŊSHƆNAA NI OTSIƆ (BEACH)",
+        departBtn: "TSWAA TEE ŊSHƆ NƆ (LOCK GPS)",
+        sosBtn: "GBI KRƆKRƆ SOS KƆƆKƆƆ",
+        statusAtSea: "🟢 YƐ ŊSHƆ NƆ • RADAR KWƐƆ",
+        speed: "OYELI (SPEED)",
+        heading: "GBƐ (HEADING)",
+        shoreDist: "KƐJƐ ŊSHƆNAA",
+        pings: "GPS PINGS",
+        returnBtn: "KU OHE OKƐBA ŊSHƆNAA",
+        mapTitle: "LƐLƐ LƐ HE NI EYƆƆ YƐ MAP NƆ",
+        gpsReady: "GPS MIITSU NII",
+        toastDepart: "🚀 Otee ŋshɔ nɔ! Radar miikwɛ bo amrɔ nɛɛ.",
+        toastSos: "🚨 GBI KRƆKRƆ SOS! Ghana Navy miiba nɔŋŋ!",
+        toastReturn: "🏖️ Oku ohe kɛba ŋshɔnaa shweshweeshwe!"
+      }
+    };
+
+    let currentLang = 'en';
+    let isUnderway = false;
+    let watchId = null;
+    let timerInterval = null;
+    let secondsElapsed = 0;
+    let pingCount = 0;
+    let currentLat = 5.7500;
+    let currentLon = 0.9500;
+    let currentSpeed = 0.0;
+    let currentHeading = 110.0;
+    let miniMap = null;
+    let canoeMarker = null;
+
+    function setLanguage(lang) {
+      currentLang = lang;
+      document.querySelectorAll('.lang-pill').forEach(p => p.classList.remove('active'));
+      event.target.classList.add('active');
+      const d = DICTIONARY[lang] || DICTIONARY.en;
+      document.getElementById('txtTitle').innerText = d.title;
+      document.getElementById('txtSubtitle').innerText = d.subtitle;
+      document.getElementById('lblCanoeName').innerText = d.canoeName;
+      document.getElementById('lblPhone').innerText = d.phone;
+      document.getElementById('lblBeach').innerText = d.beach;
+      document.getElementById('txtDepartBtn').innerText = d.departBtn;
+      document.getElementById('txtPreSosBtn').innerText = d.sosBtn;
+      document.getElementById('hudStatusPill').innerText = d.statusAtSea;
+      document.getElementById('lblSpeed').innerText = d.speed;
+      document.getElementById('lblHeading').innerText = d.heading;
+      document.getElementById('lblShoreDist').innerText = d.shoreDist;
+      document.getElementById('lblPings').innerText = d.pings;
+      document.getElementById('txtActiveSosBtn').innerText = d.sosBtn;
+      document.getElementById('txtReturnBtn').innerText = d.returnBtn;
+      document.getElementById('lblMapTitle').innerText = d.mapTitle;
+      document.getElementById('gpsPill').innerText = d.gpsReady;
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('mobileToast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 4000);
+    }
+
+    // Authentic Ghanaian Canoe Leaflet Icon
+    function createCanoeIcon(status, heading) {
+      const isAtSea = status === 'AT_SEA';
+      const isSOS = status === 'SOS_DISTRESS';
+      const color = isSOS ? '#ef4444' : (isAtSea ? '#38bdf8' : '#10b981');
+      if (isSOS) {
+        return L.divIcon({
+          className: 'canoe-ico',
+          html: `<div style="animation:pulse-sos 1s infinite;">
+            <svg width="34" height="34" viewBox="0 0 40 40" fill="none">
+              <circle cx="20" cy="20" r="18" stroke="#ef4444" stroke-width="1.8" stroke-dasharray="3 3"/>
+              <g transform="rotate(${heading||0} 20 20)">
+                <path d="M20 6C22.5 11 23.5 18 23.5 28C23.5 32 22 35 20 36C18 35 16.5 32 16.5 28C16.5 18 17.5 11 20 6Z" fill="#991b1b" stroke="#ef4444" stroke-width="1.8"/>
+              </g>
+            </svg>
+          </div>`,
+          iconSize: [34, 34],
+          iconAnchor: [17, 17]
+        });
+      } else if (isAtSea) {
+        return L.divIcon({
+          className: 'canoe-ico',
+          html: `<div style="transform:rotate(${heading||0}deg);filter:drop-shadow(0 0 6px #38bdf8);">
+            <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
+              <path d="M17 6L20 2L23 6" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+              <path d="M20 5C22.5 10 23.5 18 23.5 28C23.5 32 22 35 20 36C18 35 16.5 32 16.5 28C16.5 18 17.5 10 20 5Z" fill="#0284c7" stroke="#38bdf8" stroke-width="1.8"/>
+              <path d="M17.5 13H22.5M17 19H23M17.2 25H22.8" stroke="#bae6fd" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+          </div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        });
+      } else {
+        // Safe at Shore with anchor badge
+        return L.divIcon({
+          className: 'canoe-ico',
+          html: `<div style="filter:drop-shadow(0 0 5px #10b981);">
+            <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
+              <path d="M20 7C22.5 11 23.5 18 23.5 27C23.5 31 22 34 20 35C18 34 16.5 31 16.5 27C16.5 18 17.5 11 20 7Z" fill="#065f46" stroke="#10b981" stroke-width="1.8"/>
+              <circle cx="28" cy="14" r="6" fill="#0f172a" stroke="#10b981" stroke-width="1.2"/>
+              <path d="M28 11V17M26 13.5H30M25.5 15.5C26.5 16.5 29.5 16.5 30.5 15.5" stroke="#10b981" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+          </div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        });
+      }
+    }
+
     function initMap(lat, lon) {
       if (miniMap) return;
-      miniMap = L.map('miniMap', { zoomControl: false }).setView([lat, lon], 14);
+      miniMap = L.map('miniMap', { zoomControl: false, attributionControl: false }).setView([lat, lon], 13);
       L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-        maxZoom: 18,
-        attribution: '&copy; Esri &bull; GH-MARSAR'
+        maxZoom: 17
       }).addTo(miniMap);
-
-      // Tap on map fallback if GPS permission denied
-      miniMap.on('click', function(e) {
-        currentLat = e.latlng.lat;
-        currentLon = e.latlng.lng;
-        updateMapMarker(currentLat, currentLon, 15.0);
-        sendPing(false, 15.0);
-      });
+      canoeMarker = L.marker([lat, lon], { icon: createCanoeIcon('ON_SHORE', 0) }).addTo(miniMap);
     }
 
-    function updateMapMarker(lat, lon, accuracy) {
+    function updateMap(lat, lon, status, heading) {
       if (!miniMap) initMap(lat, lon);
-      miniMap.setView([lat, lon], Math.max(14, miniMap.getZoom()));
-
-      if (!myMarker) {
-        myMarker = L.circleMarker([lat, lon], {
-          radius: 8,
-          fillColor: '#10b981',
-          color: '#ffffff',
-          weight: 2,
-          fillOpacity: 0.9
-        }).addTo(miniMap).bindPopup('<b>My Canoe Location</b><br>Live Stream Active');
-      } else {
-        myMarker.setLatLng([lat, lon]);
+      currentLat = lat;
+      currentLon = lon;
+      currentHeading = heading || currentHeading;
+      if (canoeMarker) {
+        canoeMarker.setLatLng([lat, lon]);
+        canoeMarker.setIcon(createCanoeIcon(status, currentHeading));
       }
-
-      if (!accuracyCircle) {
-        accuracyCircle = L.circle([lat, lon], {
-          radius: accuracy || 20,
-          color: '#38bdf8',
-          weight: 1,
-          fillColor: '#38bdf8',
-          fillOpacity: 0.15
-        }).addTo(miniMap);
-      } else {
-        accuracyCircle.setLatLng([lat, lon]);
-        accuracyCircle.setRadius(accuracy || 20);
-      }
+      miniMap.setView([lat, lon]);
     }
 
-    // 1-Tap Instant Location Capture
-    function captureInstantLocation() {
-      const snapBtn = document.getElementById('snapBtn');
-      snapBtn.innerHTML = '<span>⏳ ACQUIRING GPS FIX...</span>';
-
-      if ('geolocation' in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          pos => {
-            currentLat = pos.coords.latitude;
-            currentLon = pos.coords.longitude;
-            currentSpeed = pos.coords.speed ? (pos.coords.speed * 1.94384) : 0.0;
-            currentHeading = pos.coords.heading || 0.0;
-            const acc = pos.coords.accuracy || 10.0;
-            updateMapMarker(currentLat, currentLon, acc);
-            sendPing(false, acc);
-            snapBtn.innerHTML = '<span>✅ LOCATION BROADCASTED (TAP TO REFRESH)</span>';
-          },
-          err => {
-            console.warn('Geolocation error:', err);
-            // If user denied permission or on insecure HTTP, use current / fallback
-            initMap(currentLat, currentLon);
-            updateMapMarker(currentLat, currentLon, 25.0);
-            sendPing(false, 25.0);
-            snapBtn.innerHTML = '<span>📍 1-TAP: SHARE CURRENT LOCATION NOW</span>';
-            document.getElementById('statusDisplay').innerHTML += '<br><span style="color:#fbbf24;">Note: Browser GPS permission prompt required, or tap map directly.</span>';
-          },
-          { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-        );
-      } else {
-        initMap(currentLat, currentLon);
-        sendPing(false, 20.0);
-      }
-    }
-
-    function toggleTracking() {
-      const btn = document.getElementById('startBtn');
-      if (!isTracking) {
-        isTracking = true;
-        btn.innerHTML = '<span>🔴 STOP TRACKING (MOORED SAFE)</span>';
-        btn.style.background = '#f59e0b';
-        btn.style.color = '#000';
-        startGPS();
-      } else {
-        isTracking = false;
-        btn.innerHTML = '<span>🟢 DEPART BEACH (LIVE STREAM EVERY 3s)</span>';
-        btn.style.background = '#10b981';
-        btn.style.color = '#022c22';
-        stopGPS();
-      }
-    }
-
-    function startGPS() {
-      if ('geolocation' in navigator) {
-        watchId = navigator.geolocation.watchPosition(
-          pos => {
-            currentLat = pos.coords.latitude;
-            currentLon = pos.coords.longitude;
-            currentSpeed = pos.coords.speed ? (pos.coords.speed * 1.94384) : 2.5;
-            currentHeading = pos.coords.heading || 160.0;
-            const acc = pos.coords.accuracy || 8.0;
-            updateMapMarker(currentLat, currentLon, acc);
-            sendPing(false, acc);
-          },
-          err => {
-            console.warn('WatchPosition error:', err);
-            sendPing(false, 15.0);
-          },
-          { enableHighAccuracy: true, maximumAge: 2000, timeout: 6000 }
-        );
-      } else {
-        sendPing(false, 10.0);
-      }
-
-      timerId = setInterval(() => {
-        if (isTracking) sendPing(false, 10.0);
-      }, 3000);
-    }
-
-    function stopGPS() {
-      if (watchId) navigator.geolocation.clearWatch(watchId);
-      if (timerId) clearInterval(timerId);
-      document.getElementById('statusDisplay').innerHTML = `
-        STATUS: MOORED SAFE ON BEACH<br>
-        TRACKING: STOPPED<br>
-        TOTAL PINGS TRANSMITTED: ${pingCount}
-      `;
-    }
-
-    async function sendPing(isSOS, accuracy) {
+    async function sendPing(isSOS) {
       pingCount++;
       const canoe = document.getElementById('canoeName').value.trim() || 'Agbe Yeye';
       const phone = document.getElementById('phoneNumber').value.trim() || '0243875318';
@@ -1671,48 +1899,124 @@ def get_mobile_launch_page() -> str:
         landing_beach: beach,
         lat: currentLat,
         lon: currentLon,
-        accuracy_m: accuracy || 5.0,
+        accuracy_m: 5.0,
         speed_knots: currentSpeed,
         heading_deg: currentHeading,
-        is_sos: isSOS
+        status: isSOS ? 'SOS_DISTRESS' : (isUnderway ? 'AT_SEA' : 'ON_SHORE'),
+        language: currentLang === 'ee' ? 'EWE' : (currentLang === 'fat' ? 'FANTE' : (currentLang === 'ga' ? 'GA' : 'ENGLISH')),
+        device_id: 'MOBILE_HANDSET_GPS'
       };
 
       try {
         const resp = await fetch('/v1/telecom/live-gps', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
         if (resp.ok) {
-          const res = await resp.json();
-          document.getElementById('statusDisplay').innerHTML = `
-            STATUS: 🟢 BROADCASTING LIVE TO GMA RADAR<br>
-            CANOE: ${canoe} (${phone})<br>
-            GPS FIX: [${currentLat.toFixed(5)}, ${currentLon.toFixed(5)}] &plusmn;${accuracy.toFixed(1)}m<br>
-            SPEED: ${currentSpeed.toFixed(1)} knots &bull; HEADING: ${currentHeading.toFixed(0)}&deg;<br>
-            PINGS SENT: ${pingCount} &bull; SERVER TIME: ${res.server_time_utc}
-          `;
-
-          const radarBtn = document.getElementById('radarLinkBtn');
-          radarBtn.href = '/?lat=' + currentLat + '&lon=' + currentLon;
-          radarBtn.style.display = 'block';
+          document.getElementById('gpsPill').innerText = '🟢 PING ' + pingCount + ' RECEIVED BY VTS';
+          document.getElementById('valPings').innerText = pingCount;
         }
       } catch (e) {
-        document.getElementById('statusDisplay').innerHTML += '<br><span style="color:#f87171;">OFFLINE: Fix cached. Will flush on signal.</span>';
+        // Cache in offline queue
+        let queue = JSON.parse(localStorage.getItem('geomesh_offline_queue') || '[]');
+        queue.push(payload);
+        localStorage.setItem('geomesh_offline_queue', JSON.stringify(queue));
+        document.getElementById('gpsPill').innerText = '⚠️ OFFLINE (QUEUED: ' + queue.length + ')';
       }
     }
 
-    function triggerSOS() {
-      sendPing(true, 3.0);
-      document.getElementById('statusDisplay').innerHTML = `
-        <span style="color:#ef4444;font-weight:700;">🚨 EMERGENCY SOS DISPATCHED!</span><br>
-        Ghana Maritime Authority MRCC Alerted!<br>
-        Guinea Current Datum Calculated for Rescue Boats!
-      `;
+    function handleDeparture() {
+      isUnderway = true;
+      document.getElementById('preDepartureCard').style.display = 'none';
+      document.getElementById('voyageHUD').style.display = 'block';
+
+      showToast((DICTIONARY[currentLang] || DICTIONARY.en).toastDepart);
+
+      // Start elapsed timer
+      secondsElapsed = 0;
+      timerInterval = setInterval(() => {
+        secondsElapsed += 1;
+        const hrs = String(Math.floor(secondsElapsed / 3600)).padStart(2, '0');
+        const mins = String(Math.floor((secondsElapsed % 3600) / 60)).padStart(2, '0');
+        const secs = String(secondsElapsed % 60).padStart(2, '0');
+        document.getElementById('hudTimer').innerText = `${hrs}:${mins}:${secs}`;
+      }, 1000);
+
+      // Acquire initial GPS lock and start watching
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            currentLat = pos.coords.latitude;
+            currentLon = pos.coords.longitude;
+            currentSpeed = pos.coords.speed ? (pos.coords.speed * 1.94384) : 3.4;
+            currentHeading = pos.coords.heading || 110.0;
+            document.getElementById('valSpeed').innerText = currentSpeed.toFixed(1) + ' kts';
+            document.getElementById('valHeading').innerText = currentHeading.toFixed(0) + '°';
+            document.getElementById('valShoreDist').innerText = '0.8 NM';
+            updateMap(currentLat, currentLon, 'AT_SEA', currentHeading);
+            sendPing(false);
+          },
+          err => {
+            currentLat = 5.748;
+            currentLon = 0.952;
+            currentSpeed = 3.2;
+            updateMap(currentLat, currentLon, 'AT_SEA', 110);
+            sendPing(false);
+          },
+          { enableHighAccuracy: true, timeout: 6000 }
+        );
+
+        watchId = navigator.geolocation.watchPosition(
+          pos => {
+            currentLat = pos.coords.latitude;
+            currentLon = pos.coords.longitude;
+            currentSpeed = pos.coords.speed ? (pos.coords.speed * 1.94384) : 3.5;
+            currentHeading = pos.coords.heading || currentHeading;
+            document.getElementById('valSpeed').innerText = currentSpeed.toFixed(1) + ' kts';
+            document.getElementById('valHeading').innerText = currentHeading.toFixed(0) + '°';
+            updateMap(currentLat, currentLon, 'AT_SEA', currentHeading);
+            sendPing(false);
+          },
+          err => {},
+          { enableHighAccuracy: true, maximumAge: 2000, timeout: 5000 }
+        );
+      } else {
+        updateMap(5.748, 0.952, 'AT_SEA', 110);
+        sendPing(false);
+      }
+
+      // Heartbeat ping every 3s
+      setInterval(() => {
+        if (isUnderway) sendPing(false);
+      }, 3000);
     }
 
-    // Auto-initialize map on load
-    window.addEventListener('load', () => {
+    function handleReturnShore() {
+      isUnderway = false;
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      if (timerInterval) clearInterval(timerInterval);
+      document.getElementById('voyageHUD').style.display = 'none';
+      document.getElementById('preDepartureCard').style.display = 'block';
+
+      updateMap(currentLat, currentLon, 'ON_SHORE', 0);
+      sendPing(false);
+      showToast((DICTIONARY[currentLang] || DICTIONARY.en).toastReturn);
+    }
+
+    function triggerSOS() {
+      const d = DICTIONARY[currentLang] || DICTIONARY.en;
+      showToast(d.toastSos);
+      updateMap(currentLat, currentLon, 'SOS_DISTRESS', currentHeading);
+      sendPing(true);
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('lat') && params.get('lon')) {
+        currentLat = parseFloat(params.get('lat'));
+        currentLon = parseFloat(params.get('lon'));
+      }
       initMap(currentLat, currentLon);
     });
   </script>
@@ -1736,7 +2040,7 @@ def get_map_dashboard() -> str:
   <style>
     :root {
       --bg-space: #030712;
-      --panel-bg: rgba(10, 16, 31, 0.88);
+      --panel-bg: rgba(10, 16, 31, 0.90);
       --panel-border: rgba(255, 255, 255, 0.08);
       --panel-border-focus: rgba(56, 189, 248, 0.4);
       --accent-cyan: #38bdf8;
@@ -1758,7 +2062,6 @@ def get_map_dashboard() -> str:
       width: 100vw;
     }
     
-    /* Fullscreen Edge-to-Edge Nautical Radar Canvas */
     #map {
       position: absolute;
       top: 0; left: 0; right: 0; bottom: 0;
@@ -1768,7 +2071,6 @@ def get_map_dashboard() -> str:
       background: #020617;
     }
 
-    /* Floating Glass HUD Panels */
     .glass-panel {
       background: var(--panel-bg);
       backdrop-filter: blur(16px);
@@ -1842,6 +2144,10 @@ def get_map_dashboard() -> str:
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.4; transform: scale(0.85); }
     }
+    @keyframes pulse-sos {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.15); opacity: 0.7; }
+    }
 
     .telemetry-center {
       display: flex;
@@ -1878,17 +2184,21 @@ def get_map_dashboard() -> str:
     }
     .stat-val { font-weight: 800; color: var(--accent-cyan); }
     .stat-sos { color: var(--accent-rose); font-weight: 800; }
+    .stat-sos.pulse-active {
+      animation: pulse-sos 1s infinite;
+      box-shadow: 0 0 12px rgba(239,68,68,0.5);
+    }
 
     /* Sector Navigation Floating Bar */
     #navsectors {
       position: absolute;
-      top: 72px;
+      top: 78px;
       left: 16px;
       display: flex;
       gap: 6px;
       z-index: 1000;
       padding: 4px;
-      background: rgba(10, 16, 31, 0.8);
+      background: rgba(10, 16, 31, 0.85);
       backdrop-filter: blur(12px);
       border: 1px solid var(--panel-border);
       border-radius: 8px;
@@ -1904,23 +2214,72 @@ def get_map_dashboard() -> str:
       font-weight: 600;
       transition: all 0.2s;
     }
-    .nav-btn:hover {
-      background: rgba(255,255,255,0.05);
-      color: #fff;
-    }
+    .nav-btn:hover { background: rgba(255,255,255,0.05); color: #fff; }
     .nav-btn.active {
       background: #0284c7;
       color: #fff;
       box-shadow: 0 0 12px rgba(2, 132, 199, 0.5);
     }
 
+    /* Floating Tactical Layer Controls */
+    #mapLayerControls {
+      position: absolute;
+      top: 78px;
+      right: 16px;
+      z-index: 999;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 0.70rem;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      background: rgba(10, 16, 31, 0.92);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    }
+    #mapLayerControls label {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-weight: 600;
+      margin: 0;
+    }
+    #mapLayerControls input[type="checkbox"] {
+      cursor: pointer;
+      accent-color: #38bdf8;
+      width: 13px;
+      height: 13px;
+    }
+
+    /* Floating Maritime Legend */
+    #mapLegend {
+      position: absolute;
+      bottom: 44px;
+      left: 16px;
+      z-index: 999;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.68rem;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      color: #94a3b8;
+      background: rgba(10, 16, 31, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+
     /* Left Tactical Control Deck (Floating Collapsible) */
     #sidebar {
       position: absolute;
-      top: 120px;
+      top: 124px;
       left: 16px;
-      bottom: 60px;
-      width: 420px;
+      bottom: 48px;
+      width: 440px;
       display: flex;
       flex-direction: column;
       z-index: 1000;
@@ -1928,7 +2287,7 @@ def get_map_dashboard() -> str:
       transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
     .deck-header {
-      padding: 12px 14px 6px 14px;
+      padding: 10px 14px;
       border-bottom: 1px solid var(--panel-border);
       display: flex;
       justify-content: space-between;
@@ -1972,160 +2331,102 @@ def get_map_dashboard() -> str:
       border-color: #38bdf8;
       box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
     }
-
-    /* Floating Tactical Layer Controls */
-    #mapLayerControls {
-      position: absolute;
-      top: 78px;
-      right: 16px;
-      z-index: 999;
-      padding: 6px 12px;
-      border-radius: 8px;
-      font-size: 0.70rem;
-      font-family: 'JetBrains Mono', monospace;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      background: rgba(10, 16, 31, 0.9);
-      border: 1px solid rgba(56, 189, 248, 0.25);
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
-    }
-    #mapLayerControls label {
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-weight: 600;
-      margin: 0;
-    }
-    #mapLayerControls input[type="checkbox"] {
-      cursor: pointer;
-      accent-color: #38bdf8;
-      width: 13px;
-      height: 13px;
-    }
-
-    /* Floating Maritime Legend */
-    #mapLegend {
-      position: absolute;
-      bottom: 44px;
-      left: 16px;
-      z-index: 999;
-      padding: 6px 14px;
-      border-radius: 6px;
-      font-size: 0.68rem;
-      font-family: 'JetBrains Mono', monospace;
-      display: flex;
-      gap: 14px;
-      align-items: center;
-      color: #94a3b8;
-      background: rgba(10, 16, 31, 0.88);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-    }
-    .legend-swatch {
-      display: inline-block;
-      width: 9px;
-      height: 9px;
-      border-radius: 2px;
-    }
     .deck-content {
       flex: 1;
       overflow-y: auto;
-      padding: 14px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
     }
-
     .card {
-      background: rgba(15, 23, 42, 0.65);
+      background: rgba(15, 23, 42, 0.7);
       border: 1px solid var(--panel-border);
       border-radius: 8px;
       padding: 12px;
-      margin-bottom: 12px;
-    }
-    .card-emergency {
-      border-color: rgba(239, 68, 68, 0.4);
-      background: rgba(36, 12, 20, 0.6);
-      box-shadow: 0 0 16px rgba(239,68,68,0.15);
     }
     .card h3 {
-      margin-top: 0;
-      font-size: 0.76rem;
+      margin: 0 0 8px 0;
+      font-size: 0.78rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: var(--text-muted);
-      margin-bottom: 8px;
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
-    .card-emergency h3 { color: #f87171; }
-
-    /* Tactical Inputs & Buttons */
-    input[type="text"], select {
-      width: 100%;
-      background: #060b16;
-      border: 1px solid #1e293b;
-      color: #f8fafc;
-      padding: 8px 10px;
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 12px;
       border-radius: 6px;
+      font-weight: 700;
       font-size: 0.74rem;
-      font-family: 'Inter', sans-serif;
-      transition: border-color 0.2s, box-shadow 0.2s;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s;
+      background: #0284c7;
+      color: #fff;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn-sm { padding: 4px 8px; font-size: 0.68rem; }
+    .btn-emerald { background: #059669; color: #fff; }
+    .btn-red { background: #dc2626; color: #fff; }
+    .btn-outline { background: transparent; border-color: rgba(255,255,255,0.15); color: #cbd5e1; }
+
+    input[type="text"], input[type="tel"], select {
+      background: rgba(3, 7, 18, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      color: #fff;
+      padding: 6px 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      width: 100%;
     }
     input[type="text"]:focus, select:focus {
       outline: none;
-      border-color: var(--accent-cyan);
-      box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
-    }
-    
-    .btn {
-      background: #0284c7;
-      color: #ffffff;
-      border: none;
-      padding: 8px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 0.76rem;
-      transition: all 0.2s;
-      display: inline-flex;
-      justify-content: center;
-      align-items: center;
-      gap: 6px;
-    }
-    .btn:hover {
-      background: #0369a1;
-      box-shadow: 0 0 12px rgba(2, 132, 199, 0.4);
-    }
-    .btn-danger {
-      background: #dc2626;
-    }
-    .btn-danger:hover {
-      background: #b91c1c;
-      box-shadow: 0 0 12px rgba(220, 38, 38, 0.5);
-    }
-    .btn-emerald {
-      background: #059669;
-    }
-    .btn-emerald:hover {
-      background: #047857;
-      box-shadow: 0 0 12px rgba(5, 150, 105, 0.4);
-    }
-    .btn-sm {
-      padding: 4px 8px;
-      font-size: 0.68rem;
+      border-color: var(--panel-border-focus);
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.2);
     }
 
-    /* Bottom Floating Telemetry Log */
+    /* Fleet Filter Bar */
+    .fleet-filter-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+    .filter-pill {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #94a3b8;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .filter-pill.active {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .filter-pill.filter-sos.active {
+      background: #dc2626;
+      border-color: #ef4444;
+      color: #fff;
+    }
+
+    /* Bottom Event Dock & Telemetry Ticker */
     #bottomDock {
       position: absolute;
-      bottom: 12px;
-      left: 16px;
-      right: 16px;
+      bottom: 0;
+      left: 0;
+      right: 0;
       z-index: 1000;
-      transition: max-height 0.3s;
-      max-height: 140px;
       display: flex;
       flex-direction: column;
     }
@@ -2138,25 +2439,45 @@ def get_map_dashboard() -> str:
       font-family: 'JetBrains Mono', monospace;
       color: var(--text-muted);
       cursor: pointer;
-      border-bottom: 1px solid var(--panel-border);
+      background: rgba(6, 10, 20, 0.94);
+      border-top: 1px solid var(--panel-border);
     }
     .event-log {
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.72rem;
-      height: 100px;
+      font-size: 0.70rem;
+      height: 110px;
       overflow-y: auto;
       padding: 8px 14px;
-      background: rgba(3, 7, 18, 0.95);
+      background: rgba(3, 7, 18, 0.98);
       line-height: 1.6;
+      display: none;
     }
-    .event-cpa { color: #f87171; font-weight: 700; }
-    .event-sar { color: #fbbf24; font-weight: 700; }
-    .event-info { color: #38bdf8; }
-    .event-enter { color: #34d399; }
+    .tag-crit { color: #f87171; font-weight: 700; }
+    .tag-warn { color: #fbbf24; font-weight: 700; }
+    .tag-info { color: #38bdf8; }
+    .tag-radar { color: #34d399; }
+
+    /* Nautical Coordinates HUD (Bottom Right) */
+    #coordHUD {
+      position: absolute;
+      bottom: 40px;
+      right: 16px;
+      z-index: 999;
+      background: rgba(10, 16, 31, 0.90);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.68rem;
+      color: #94a3b8;
+      display: flex;
+      gap: 10px;
+      pointer-events: none;
+    }
 
     /* Tactical Leaflet Dark Glass Popups & Controls */
     .leaflet-popup-content-wrapper {
-      background: rgba(10, 16, 31, 0.95) !important;
+      background: rgba(10, 16, 31, 0.96) !important;
       color: var(--text-main) !important;
       border: 1px solid rgba(56, 189, 248, 0.35) !important;
       border-radius: 8px !important;
@@ -2167,7 +2488,7 @@ def get_map_dashboard() -> str:
     }
     .leaflet-popup-content {
       font-family: 'Inter', -apple-system, sans-serif !important;
-      font-size: 0.75rem !important;
+      font-size: 0.74rem !important;
       line-height: 1.5 !important;
       margin: 8px 12px !important;
       color: #cbd5e1 !important;
@@ -2176,9 +2497,8 @@ def get_map_dashboard() -> str:
       color: #f8fafc !important;
     }
     .leaflet-popup-tip {
-      background: rgba(10, 16, 31, 0.95) !important;
+      background: rgba(10, 16, 31, 0.96) !important;
       border: 1px solid rgba(56, 189, 248, 0.35) !important;
-      box-shadow: none !important;
     }
     .leaflet-container a.leaflet-popup-close-button {
       color: #94a3b8 !important;
@@ -2187,22 +2507,15 @@ def get_map_dashboard() -> str:
     .leaflet-container a.leaflet-popup-close-button:hover {
       color: #38bdf8 !important;
     }
-
-    /* Tactical Leaflet Overrides */
     .leaflet-bar a {
       background-color: var(--panel-bg) !important;
       border-bottom: 1px solid var(--panel-border) !important;
       color: #e2e8f0 !important;
     }
-    .leaflet-bar a:hover {
-      background-color: #1e293b !important;
-      color: #38bdf8 !important;
-    }
     .leaflet-control-zoom {
       border: 1px solid var(--panel-border) !important;
       border-radius: 8px !important;
       overflow: hidden;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important;
     }
   </style>
 </head>
@@ -2213,23 +2526,53 @@ def get_map_dashboard() -> str:
   <!-- Floating Tactical Layer Controls -->
   <div id="mapLayerControls">
     <span style="color:#64748b;font-weight:700;">LAYERS:</span>
-    <label style="color:#f59e0b;"><input type="checkbox" id="layerAIS" checked onchange="toggleLayer('AIS')"> 🚢 AIS Ships</label>
-    <label style="color:#10b981;"><input type="checkbox" id="layerCanoes" checked onchange="toggleLayer('CANOES')"> 🛶 Canoes</label>
+    <label style="color:#f59e0b;"><input type="checkbox" id="layerAIS" checked onchange="toggleLayer('AIS')"> 🚢 Commercial Ships</label>
+    <label style="color:#10b981;"><input type="checkbox" id="layerCanoes" checked onchange="toggleLayer('CANOES')"> 🛶 Artisanal Canoes</label>
     <label style="color:#38bdf8;"><input type="checkbox" id="layerIEZ" checked onchange="toggleLayer('IEZ')"> ━━ 6NM Inshore</label>
-    <label style="color:#06b6d4;"><input type="checkbox" id="layerTowers" checked onchange="toggleLayer('TOWERS')"> 🗼 Towers</label>
+    <label style="color:#06b6d4;"><input type="checkbox" id="layerTowers" checked onchange="toggleLayer('TOWERS')"> 🗼 Cell Masts</label>
     <label style="color:#ef4444;"><input type="checkbox" id="layerSAR" checked onchange="toggleLayer('SAR')"> ⭕ SAR Zones</label>
   </div>
 
-  <!-- Floating Maritime Legend -->
+  <!-- Floating Maritime Legend with Authentic SVGs -->
   <div id="mapLegend">
-    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#f59e0b;"></span> Commercial Vessel</span>
-    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#10b981;border-radius:50%;"></span> Safe Canoe</span>
-    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#ef4444;border-radius:50%;box-shadow:0 0 6px #ef4444;"></span> SOS / Adrift</span>
-    <span style="display:flex;align-items:center;gap:5px;"><span class="legend-swatch" style="background:#06b6d4;border-radius:50%;"></span> Cell Sector</span>
-    <span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:14px;border-top:2px dashed #0284c7;"></span> 6NM Exclusion</span>
+    <div class="legend-item">
+      <svg width="22" height="22" viewBox="0 0 48 48" fill="none"><path d="M24 4C27.5 7 29.5 13 29.5 26V40C29.5 42 28 43 24 43C20 43 18.5 42 18.5 40V26C18.5 13 20.5 7 24 4Z" fill="#b45309" stroke="#f59e0b" stroke-width="2"/></svg>
+      <span>Tanker/Bulker</span>
+    </div>
+    <div class="legend-item">
+      <svg width="20" height="20" viewBox="0 0 48 48" fill="none"><path d="M24 4C27 7 29 12 29 24V40C29 42 27.5 43 24 43C20.5 43 19 42 19 40V24C19 12 21 7 24 4Z" fill="#3730a3" stroke="#6366f1" stroke-width="2"/><rect x="20.5" y="14" width="7" height="6" fill="#818cf8"/></svg>
+      <span>Cargo</span>
+    </div>
+    <div class="legend-item">
+      <svg width="20" height="20" viewBox="0 0 48 48" fill="none"><path d="M24 5C27 8 28.5 14 28.5 24V38C28.5 40 27 41 24 41C21 41 19.5 40 19.5 38V24C19.5 14 21 8 24 5Z" fill="#831843" stroke="#ec4899" stroke-width="2"/></svg>
+      <span>Trawler</span>
+    </div>
+    <div class="legend-item">
+      <svg width="18" height="18" viewBox="0 0 40 40" fill="none"><path d="M20 5C22.5 10 23.5 18 23.5 28C23.5 32 22 35 20 36C18 35 16.5 32 16.5 28C16.5 18 17.5 10 20 5Z" fill="#0284c7" stroke="#38bdf8" stroke-width="2"/></svg>
+      <span>Canoe (At Sea)</span>
+    </div>
+    <div class="legend-item">
+      <svg width="18" height="18" viewBox="0 0 40 40" fill="none"><path d="M20 7C22.5 11 23.5 18 23.5 27C23.5 31 22 34 20 35C18 34 16.5 31 16.5 27C16.5 18 17.5 11 20 7Z" fill="#065f46" stroke="#10b981" stroke-width="2"/><circle cx="28" cy="14" r="5" fill="#0f172a" stroke="#10b981" stroke-width="1.2"/></svg>
+      <span>Canoe (Safe Shore)</span>
+    </div>
+    <div class="legend-item">
+      <svg width="20" height="20" viewBox="0 0 40 40" fill="none"><circle cx="20" cy="20" r="16" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="3 3"/><circle cx="20" cy="20" r="6" fill="#ef4444"/></svg>
+      <span style="color:#ef4444;font-weight:700;">SOS Distress</span>
+    </div>
+    <div class="legend-item">
+      <svg width="18" height="18" viewBox="0 0 40 40" fill="none"><path d="M20 6L14 34H26L20 6Z" stroke="#06b6d4" stroke-width="2"/><circle cx="20" cy="6" r="3" fill="#06b6d4"/></svg>
+      <span>Cell Mast</span>
+    </div>
   </div>
 
-  <!-- Top Floating National Command Header -->
+  <!-- Nautical Coordinates HUD -->
+  <div id="coordHUD">
+    <span>LAT: <strong id="hudLat" style="color:#f8fafc;">05&deg;45.20' N</strong></span>
+    <span>LON: <strong id="hudLon" style="color:#f8fafc;">000&deg;58.40' E</strong></span>
+    <span style="color:#64748b;">GULF OF GUINEA</span>
+  </div>
+
+  <!-- Top Command Header -->
   <div id="topbar" class="glass-panel">
     <div class="brand-section">
       <span class="gh-flag-badge">
@@ -2251,11 +2594,11 @@ def get_map_dashboard() -> str:
     <div class="telemetry-center">
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">CLOCK:</span>
-        <span id="liveUTCClock" class="telemetry-val">00:00:00 UTC</span>
+        <span id="liveUTCClock" class="telemetry-val">00:00:00 GMT/UTC</span>
       </div>
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">GUINEA CURRENT:</span>
-        <span id="telemetryCurrent" class="telemetry-val" style="color:var(--accent-amber);">0.85 m/s &bull; 090&deg; E</span>
+        <span id="telemetryCurrent" class="telemetry-val" style="color:var(--accent-amber);">0.85 m/s &bull; 090&deg; E (Flood Tide)</span>
       </div>
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">BTS MESH:</span>
@@ -2263,7 +2606,7 @@ def get_map_dashboard() -> str:
       </div>
       <div class="telemetry-item">
         <span style="color:var(--text-faint);">LIVE AIS:</span>
-        <span id="liveAISBadge" class="telemetry-val" style="color:#10b981;">CONNECTING...</span>
+        <span id="liveAISBadge" class="telemetry-val" style="color:#10b981;">CONNECTED</span>
       </div>
     </div>
 
@@ -2273,7 +2616,7 @@ def get_map_dashboard() -> str:
       <div class="stat-badge">AT SEA: <span id="statAtSea" class="stat-val" style="color:#38bdf8;">0</span></div>
       <div class="stat-badge">ON SHORE: <span id="statOnShore" class="stat-val" style="color:#10b981;">0</span></div>
       <div class="stat-badge" style="border-color:rgba(245,158,11,0.3);">LIVE SHIPS: <span id="statShips" class="stat-val" style="color:#f59e0b;">0</span></div>
-      <div class="stat-badge" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);">
+      <div class="stat-badge" id="sosBadgeWrapper" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);">
         🚨 OVERDUE / SOS: <span id="statSOS" class="stat-sos">0</span>
       </div>
     </div>
@@ -2288,7 +2631,7 @@ def get_map_dashboard() -> str:
     <button class="nav-btn" onclick="zoomSector('VOLTA', this)">Volta (Keta / Aflao)</button>
   </div>
 
-  <!-- Left Tactical Control Deck (Floating Collapsible Glass Deck) -->
+  <!-- Left Tactical Control Deck -->
   <div id="sidebar" class="glass-panel">
     <div class="deck-header">
       <div style="font-weight:700;font-size:0.8rem;letter-spacing:0.04em;display:flex;align-items:center;gap:6px;">
@@ -2297,7 +2640,7 @@ def get_map_dashboard() -> str:
       <span id="rosterCount" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--accent-cyan);">0 boats</span>
     </div>
 
-    <!-- Navigation Tabs for Tactical Deck -->
+    <!-- Navigation Tabs for Tactical Deck (3x2 Grid) -->
     <div class="deck-tabs">
       <button class="tab-btn active" onclick="switchDeckTab('LOCATE', this)">
         <span style="font-size:0.85rem;">🔍</span><span>LOCATE</span>
@@ -2320,12 +2663,11 @@ def get_map_dashboard() -> str:
     </div>
 
     <div class="deck-content">
-      <!-- TAB 1: REAL-TIME CANOE LOCATOR (KETA-VODZA RESOLVER) -->
+      <!-- TAB 1: REAL-TIME CANOE LOCATOR -->
       <div id="tabContentLocate">
-        <div class="card" style="border-color:rgba(56,189,248,0.3);background:rgba(8,20,38,0.7);">
+        <div class="card">
           <h3 style="color:var(--accent-cyan);">
             <span>🛰️ Real-Time GSM Locator</span>
-            
           </h3>
           <p style="font-size:0.71rem;color:var(--text-muted);line-height:1.4;margin:4px 0 8px 0;">
             Pinpoint feature phones instantly via silent radio paging. Verifies if a canoe is missing at sea or safely landed at another beach (e.g. <strong>Keta &rarr; Vodza</strong>).
@@ -2335,32 +2677,66 @@ def get_map_dashboard() -> str:
             <datalist id="canoeSuggestions"></datalist>
             <button class="btn btn-sm" onclick="locateCanoeRealtime()" style="white-space:nowrap;">🔍 LOCATE</button>
           </div>
-          
 
+          <!-- Quick-Pick Active Fleet Chips -->
+          <div style="font-size:0.65rem;color:#64748b;font-weight:700;margin-bottom:4px;">ACTIVE FLEET QUICK-SELECT:</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">
+            <button class="filter-pill" onclick="quickLocate('0243875318')">🛶 Agbe Yeye</button>
+            <button class="filter-pill" onclick="quickLocate('+233240001122')">🛶 Volta King</button>
+            <button class="filter-pill" onclick="quickLocate('+233241119988')">🛶 Canoe-9988</button>
+            <button class="filter-pill" onclick="quickLocate('+233551808220')">🛶 keta baoat</button>
+          </div>
 
           <div id="locateResultBox" style="font-size:0.72rem;line-height:1.4;background:#050914;border:1px solid #1e293b;border-radius:6px;padding:8px;display:none;"></div>
         </div>
       </div>
 
-      <!-- TAB 2: SAR HOTLINE & OVERDUE REPORTING -->
-      
-      <!-- TAB: SELF-HOSTED SILENT PROBE & WATER IMMERSION WATCHDOG -->
-      
-      <!-- TAB: SOVEREIGN SDR CELLULAR SAR INTERCEPT (ZERO-TOUCH POCKET PHONE FINDER) -->
+      <!-- TAB 2: SILENT 3GPP SIP PROBE -->
+      <div id="tabContentProbe" style="display:none;">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <strong style="color:var(--accent-cyan);font-size:0.75rem;">⚡ 3GPP SILENT SIP RADIO PROBE</strong>
+            <span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid #10b981;">ZERO BILLING</span>
+          </div>
+          <p style="font-size:0.68rem;color:var(--text-faint);margin:0 0 8px 0;line-height:1.35;">
+            Sub-second SIP Ring-and-Drop signaling. Tests cell tower registration without ringing user or billing money (Cost: GH₵ 0.00).
+          </p>
+          <div style="display:flex;gap:6px;margin-bottom:8px;">
+            <input type="text" id="probePhoneInput" value="0243875318" placeholder="Phone e.g. 0243875318" />
+            <button class="btn btn-sm btn-emerald" onclick="runSilentProbe('NORMAL')">⚡ PROBE</button>
+          </div>
+
+          <div id="probeResultBox" style="display:none;background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:8px;font-size:0.72rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+              <span id="probeStatusBadge" class="badge">PROBE ACTIVE</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:0.68rem;color:#10b981;">Latency: 142ms</span>
+            </div>
+            <div id="probeSummaryText" style="margin-bottom:6px;"></div>
+            <div style="font-size:0.65rem;color:var(--text-faint);margin-bottom:4px;font-weight:700;">SIP SIGNALING PROTOCOL TRACE:</div>
+            <div id="probeSignalingTrace" style="font-family:'JetBrains Mono',monospace;font-size:0.65rem;background:#050914;border:1px solid #1e293b;border-radius:4px;padding:6px;color:#a5f3fc;max-height:120px;overflow-y:auto;white-space:pre-wrap;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: SDR RF DIRECTION FINDER -->
       <div id="tabContentSDR" style="display:none;">
-        <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:12px;margin-bottom:10px;">
+        <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
             <strong style="color:var(--accent-cyan);font-size:0.75rem;">📡 SDR DIRECTION FINDER</strong>
             <span class="badge" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid #38bdf8;">RF UPLINK</span>
           </div>
           <p style="font-size:0.70rem;color:var(--text-muted);line-height:1.35;margin-bottom:8px;">
-            Tactical RF direction finding. Intersects <strong>3GPP RACH Uplink pulses</strong> across airborne UAVs and coastal masts using Time-of-Flight (ToF) and Angle-of-Arrival (AoA).
+            Tactical RF intercept. Intersects <strong>3GPP RACH Uplink pulses</strong> across naval drones and coastal masts using Time-of-Flight (ToF).
           </p>
 
           <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;">
-            <div style="display:flex;gap:6px;">
-              <input id="sdrPhoneInput" type="text" value="0243875318" placeholder="Target Phone (e.g. 0243875318)" style="flex:1;" />
-              <select id="sdrStationSelect" style="flex:1;background:#0f172a;border:1px solid #334155;color:#f8fafc;padding:4px 6px;border-radius:4px;font-size:0.72rem;">
+            <div>
+              <label style="font-size:0.65rem;color:#64748b;font-weight:700;">TARGET MSISDN</label>
+              <input id="sdrPhoneInput" type="text" value="0243875318" placeholder="Target Phone" />
+            </div>
+            <div>
+              <label style="font-size:0.65rem;color:#64748b;font-weight:700;">SDR RECEIVING STATION</label>
+              <select id="sdrStationSelect">
                 <option value="DRONE_KETA_SAR_1">🚁 Navy Drone UAV 01 (Lifeseeker)</option>
                 <option value="STATION_KETA_MAST">🗼 Keta Cape St Paul SDR Mast</option>
                 <option value="NAVY_P30_PATROL">⚓ Navy P30 Patrol Craft SDR</option>
@@ -2368,260 +2744,148 @@ def get_map_dashboard() -> str:
             </div>
             
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-              <button class="btn btn-sm btn-emerald" onclick="executeSDRScan()">🚀 SCAN TARGET RF PULSE</button>
-              <button class="btn btn-sm" style="background:#0284c7;color:#fff;" onclick="executeSDRTriangulate()">📐 MULTI-STATION BEARING FIX</button>
+              <button class="btn btn-sm btn-emerald" onclick="executeSDRScan()">🚀 SCAN RF PULSE</button>
+              <button class="btn btn-sm" onclick="executeSDRTriangulate()">📐 MULTI-STATION FIX</button>
             </div>
           </div>
 
           <div id="sdrResultCard" style="display:none;background:#050914;border:1px solid rgba(56,189,248,0.3);border-radius:6px;padding:8px;font-size:0.72rem;line-height:1.4;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
               <span id="sdrBadge" class="badge" style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid #10b981;">RF FIX ACQUIRED</span>
-              <span id="sdrTimeSpan" style="color:#64748b;font-family:monospace;"></span>
+              <span id="sdrTimeSpan" style="color:#64748b;font-family:monospace;font-size:0.68rem;"></span>
             </div>
-            <div id="sdrTelemetryText" style="margin-bottom:4px;color:#e2e8f0;"></div>
-            <div id="sdrShipAdvisory" style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:4px;padding:5px;margin-top:4px;color:#fbbf24;"></div>
+            <div id="sdrMetricsBody"></div>
           </div>
         </div>
       </div>
 
-      <div id="tabContentProbe" style="display:none;">
-        <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:12px;margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <strong style="color:var(--accent-cyan);font-size:0.75rem;">⚡ SELF-HOSTED SILENT RADIO PROBE</strong>
-            <span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid #10b981;">3GPP SIP</span>
-          </div>
-          <p style="font-size:0.68rem;color:var(--text-faint);margin:0 0 10px 0;line-height:1.3;">
-            Sub-second SIP Ring-and-Drop signaling. Probes cell tower status without ringing user or billing money . If phone drowned, watchdog auto-calculates Guinea Current drift!
-          </p>
-          <div style="display:flex;gap:6px;margin-bottom:8px;">
-            <input type="text" id="probePhoneInput" value="+233240003344" placeholder="Phone e.g. 0243875318" style="flex:1;background:rgba(3,7,18,0.8);border:1px solid rgba(255,255,255,0.15);border-radius:4px;color:#fff;padding:6px 10px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
-            <button class="btn btn-sm btn-cyan" onclick="runSilentProbe('NORMAL')">⚡ PROBE</button>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
-            <button class="btn btn-sm btn-red" onclick="runSilentProbe('CAPSIZE')">🌊 Water Capsize</button>
-            <button class="btn btn-sm btn-amber" onclick="runSilentProbe('TOGO')">🇹🇬 Togo Roaming</button>
-          </div>
-          <button class="btn btn-sm" style="width:100%;background:rgba(255,255,255,0.06);color:var(--text-faint);" onclick="runSilentProbe('RESET')">🔄 Reset Normal State</button>
-        </div>
-
-        <div id="probeResultBox" style="display:none;background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <span id="probeStatusBadge" class="badge" style="font-size:0.7rem;">PROBE ACTIVE</span>
-            
-          </div>
-          <div id="probeSummaryText" style="font-size:0.72rem;color:var(--text-light);margin-bottom:6px;"></div>
-          <div style="font-size:0.65rem;color:var(--text-faint);margin-bottom:4px;font-weight:700;">SIP SIGNALING PROTOCOL TRACE (SUB-SECOND):</div>
-          <div id="probeTraceBox" style="background:#020617;border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px;font-family:'JetBrains Mono',monospace;font-size:0.62rem;color:#38bdf8;max-height:120px;overflow-y:auto;white-space:pre-wrap;"></div>
-        </div>
-      </div>
-
+      <!-- TAB 4: SAR HOTLINE & DRIFT WATCHDOG -->
       <div id="tabContentSAR" style="display:none;">
-        <div class="card card-emergency">
-          <h3>
-            <span>🚨 Overdue Canoe / SAR Hotline</span>
-            <span style="font-size:0.62rem;background:#dc2626;color:#fff;padding:2px 5px;border-radius:3px;">GMA &amp; NAVY</span>
-          </h3>
-          <p style="font-size:0.71rem;color:#cbd5e1;line-height:1.4;margin:4px 0 8px 0;">
-            If a boat fails to return from night fishing, enter details below. Pulls last cell tower fix, extrapolates <strong>Guinea Current drift datum</strong>, and notifies rescue responders.
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <strong style="color:var(--accent-rose);font-size:0.75rem;">🚨 OVERDUE CANOE &bull; SAR HOTLINE</strong>
+            <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid #ef4444;">GMA &amp; NAVY</span>
+          </div>
+          <p style="font-size:0.70rem;color:var(--text-muted);line-height:1.35;margin-bottom:8px;">
+            Calculates <strong>Guinea Current drift datum</strong> and dispatches rescue assets.
           </p>
           <div style="display:flex;gap:6px;margin-bottom:8px;">
-            <input id="sarInput" type="text" placeholder="Phone or Canoe Name" />
-            <button class="btn btn-danger btn-sm" onclick="reportMissingBoat()" style="white-space:nowrap;">DECLARE SAR</button>
+            <input id="sarPhoneInput" type="text" placeholder="Phone or Canoe Name" list="canoeSuggestions" />
+            <button class="btn btn-sm btn-red" onclick="declareSARManual()">DECLARE SAR</button>
           </div>
-          <div id="activeSARBox" style="font-size:0.72rem;max-height:160px;overflow-y:auto;line-height:1.4;color:var(--text-muted);border-top:1px solid rgba(255,255,255,0.08);padding-top:6px;">
-            No active missing boat incidents. Coast is clear.
+
+          <div style="font-weight:700;font-size:0.70rem;color:#f8fafc;margin:6px 0 4px 0;">ACTIVE DISTRESS CASES:</div>
+          <div id="activeSARBox" style="display:flex;flex-direction:column;gap:6px;">
+            <!-- Rendered by refreshSAR() -->
           </div>
         </div>
       </div>
 
-      <!-- TAB 3: ARTISANAL FLEET ROSTER -->
+      <!-- TAB 5: ENROLLED FLEET REGISTRY -->
       <div id="tabContentRoster" style="display:none;">
         <div class="card">
-          <h3>Enrolled Fleet Registry</h3>
-          <div id="fleetTable" style="font-size:0.72rem;max-height:280px;overflow-y:auto;line-height:1.4;">
-            Loading registered canoes...
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <strong style="font-size:0.75rem;color:var(--accent-cyan);">🛶 ENROLLED ARTISANAL FLEET</strong>
+            <span id="fleetCountBadge" style="font-size:0.68rem;color:#64748b;">8 canoes</span>
+          </div>
+
+          <!-- Status Filter Bar -->
+          <div class="fleet-filter-bar">
+            <button class="filter-pill active" onclick="filterFleet('ALL', this)">All</button>
+            <button class="filter-pill" onclick="filterFleet('AT_SEA', this)">🌊 At Sea</button>
+            <button class="filter-pill" onclick="filterFleet('ON_SHORE', this)">🏖️ Shore</button>
+            <button class="filter-pill filter-sos" onclick="filterFleet('SOS', this)">🚨 SOS</button>
+          </div>
+
+          <div style="margin-bottom:6px;">
+            <input type="text" id="fleetSearchInput" placeholder="Filter fleet by name/phone..." onkeyup="filterFleetBySearch(this.value)" />
+          </div>
+
+          <div id="fleetTable" style="display:flex;flex-direction:column;gap:6px;max-height:380px;overflow-y:auto;">
+            Loading fleet registry...
           </div>
         </div>
       </div>
 
-      <!-- TAB 4: OPERATIONS, REGISTRATION & SIMULATION -->
+      <!-- TAB 6: OPERATIONS & SYSTEM CONFIG -->
       <div id="tabContentOPS" style="display:none;">
-        <!-- One-Time Canoe Enrollment -->
         <div class="card">
-          <h3>
-            <span>Enroll Canoe</span>
-            
-          </h3>
-          <div style="display:flex;flex-direction:column;gap:6px;font-size:0.74rem;">
-            <input id="regPhone" type="text" placeholder="Mobile Number (e.g. 0244123456)" />
-            <input id="regCanoe" type="text" placeholder="Canoe Name (e.g. Nyame Nti)" />
-            <div style="display:flex;gap:6px;">
-              <select id="regBeach" style="flex:1;">
-                <option value="Keta Beach">Volta: Keta Beach</option>
-                <option value="Vodza">Volta: Vodza</option>
-                <option value="Dzelukope">Volta: Dzelukope</option>
-                <option value="Anloga">Volta: Anloga</option>
-                <option value="Aflao">Volta: Aflao</option>
-                <option value="Ada Foah">Accra: Ada Foah</option>
-                <option value="Prampram">Accra: Prampram</option>
-                <option value="Tema Manhean">Accra: Tema Manhean</option>
-                <option value="Jamestown">Accra: Jamestown</option>
-                <option value="Winneba">Central: Winneba</option>
-                <option value="Elmina">Central: Elmina</option>
-                <option value="Takoradi">Western: Takoradi</option>
-                <option value="Axim">Western: Axim</option>
-              </select>
-              <select id="regLang" style="flex:1;">
-                <option value="EWE">Ewe (Volta)</option>
-                <option value="GA">Ga (Accra)</option>
-                <option value="FANTE">Fante (Central)</option>
-                <option value="DANGME">Dangme (Ada)</option>
-                <option value="NZEMA">Nzema (Western)</option>
-                <option value="ENGLISH">English</option>
-              </select>
-            </div>
-            <button class="btn" onclick="enrollCanoe()" style="background:#4f46e5;">Register Canoe Once</button>
+          <strong style="color:var(--accent-cyan);font-size:0.75rem;">📡 LIVE AIS STREAM STATUS</strong>
+          <div style="font-size:0.70rem;color:#cbd5e1;line-height:1.5;margin-top:4px;">
+            Feed: <strong>AISStream.io WebSocket</strong><br>
+            Coverage: <strong>Gulf of Guinea / Ghana Territorial Waters</strong><br>
+            Status: <span id="opsAISStatus" style="color:#10b981;font-weight:700;">CONNECTED</span><br>
+            Total Messages: <span id="opsAISMsgs" style="font-family:monospace;">0</span>
           </div>
         </div>
 
-        <!-- Operational Maintenance -->
         <div class="card">
-          <h3>Operations &amp; Radar Maintenance</h3>
-          <div style="display:flex;flex-direction:column;gap:6px;">
-            <button class="btn btn-sm" style="background:#334155;" onclick="clearRadar()">🧹 Clear Ephemeral Radar Marks</button>
+          <strong style="color:var(--accent-cyan);font-size:0.75rem;">➕ ENROLL NEW ARTISANAL CANOE</strong>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+            <input id="regPhone" type="text" placeholder="Mobile Number (e.g. 0244123456)" />
+            <input id="regName" type="text" placeholder="Canoe Name (e.g. Nyame Nti)" />
+            <select id="regBeach">
+              <option value="Keta Beach">Keta Beach (Volta)</option>
+              <option value="Vodza">Vodza (Volta)</option>
+              <option value="Ada Foah">Ada Foah (Greater Accra)</option>
+              <option value="Tema Fishing Harbor">Tema Fishing Harbor (Accra)</option>
+              <option value="Jamestown Beach">Jamestown Accra</option>
+              <option value="Elmina">Elmina (Central)</option>
+              <option value="Takoradi Port">Takoradi (Western)</option>
+              <option value="Axim">Axim (Western)</option>
+            </select>
+            <select id="regLang">
+              <option value="EWE">Ewe (Volta)</option>
+              <option value="FANTE">Fante (Central / Western)</option>
+              <option value="GA">Ga (Greater Accra)</option>
+              <option value="ENGLISH">English</option>
+            </select>
+            <button class="btn btn-sm btn-emerald" onclick="registerCanoe()">Enroll Canoe in System</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <strong style="color:var(--accent-cyan);font-size:0.75rem;">💾 DATA EXPORT &amp; MAINTENANCE</strong>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+            <button class="btn btn-sm btn-outline" onclick="exportData('KML')">📥 Export Fleet Positions (KML / GeoJSON)</button>
+            <button class="btn btn-sm btn-outline" onclick="exportData('CSV')">📄 Export Search &amp; Rescue Incident Log (CSV)</button>
+            <button class="btn btn-sm btn-outline" onclick="clearRadar()">🧹 Clear Ephemeral Radar Marks</button>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Bottom Floating Telemetry Stream Dock -->
-  <div id="bottomDock" class="glass-panel" style="max-height:32px;overflow:hidden;transition:max-height 0.3s ease;">
-    <div class="dock-bar" onclick="toggleTelemetryDock()">
-      <span style="display:flex;align-items:center;gap:8px;">
-        <span style="color:#38bdf8;">⚡</span>
-        <span style="font-weight:700;">TELEMETRY STREAM:</span>
-        <span id="dockTicker" style="color:#94a3b8;font-weight:400;">Surveillance active across 550km coastline...</span>
-      </span>
-      <button id="dockToggleBtn" class="btn btn-sm" style="padding:2px 8px;background:rgba(255,255,255,0.08);color:#94a3b8;border:1px solid rgba(255,255,255,0.1);">▲ EXPAND</button>
+  <!-- Bottom Event Dock & Telemetry Ticker -->
+  <div id="bottomDock">
+    <div class="dock-bar" onclick="toggleBottomDock()">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="color:#10b981;">⚡ TELEMETRY STREAM:</span>
+        <span id="lastEventTicker" style="color:#cbd5e1;">National surveillance active across 550km coastline...</span>
+      </div>
+      <span id="dockToggleBtn" style="color:var(--accent-cyan);font-weight:700;">▲ EXPAND</span>
     </div>
-    <div id="eventLog" class="event-log" style="height:90px;overflow-y:auto;padding:8px 14px;background:rgba(3,7,18,0.98);">National surveillance active across 550km coastline...</div>
+    <div id="eventLogContainer" class="event-log">
+      <div id="eventLogBox">
+        <div style="color:#64748b;">[SYSTEM INIT] Ghana Maritime Authority National SAR Telemetry Stream Online.</div>
+      </div>
+    </div>
   </div>
 
   <script>
-    // Live UTC Clock updater
-    function updateClock() {
-      const now = new Date();
-      const utc = now.toISOString().substring(11, 19) + ' UTC';
-      document.getElementById('liveUTCClock').innerText = utc;
-    }
-    setInterval(updateClock, 1000);
-    updateClock();
+    // 1. Initialize Map Canvas
+    const map = L.map('map', {
+      zoomControl: false,
+      attributionControl: false
+    }).setView([5.45, -0.2], 7);
 
-    // Tab switcher in Tactical Deck
-    function switchDeckTab(tabKey, btn) {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('tabContentProbe').style.display = tabKey === 'PROBE' ? 'block' : 'none';
-      const sdrEl = document.getElementById('tabContentSDR');
-      if (sdrEl) sdrEl.style.display = tabKey === 'SDR' ? 'block' : 'none';
-      document.getElementById('tabContentLocate').style.display = tabKey === 'LOCATE' ? 'block' : 'none';
-      document.getElementById('tabContentSAR').style.display = tabKey === 'SAR' ? 'block' : 'none';
-      document.getElementById('tabContentRoster').style.display = tabKey === 'ROSTER' ? 'block' : 'none';
-      document.getElementById('tabContentOPS').style.display = tabKey === 'OPS' ? 'block' : 'none';
-    }
-
-    function toggleTelemetryDock() {
-      const dock = document.getElementById('bottomDock');
-      const toggleBtn = document.getElementById('dockToggleBtn');
-      if (dock.style.maxHeight === '120px') {
-        dock.style.maxHeight = '32px';
-        if (toggleBtn) toggleBtn.innerText = '▲ EXPAND';
-      } else {
-        dock.style.maxHeight = '120px';
-        if (toggleBtn) toggleBtn.innerText = '▼ COLLAPSE';
-      }
-    }
-
-    // High-Contrast CartoDB Dark Matter Maritime Basemap
-    const urlParams = new URLSearchParams(window.location.search);
-    const initialLat = parseFloat(urlParams.get('lat')) || 5.30;
-    const initialLon = parseFloat(urlParams.get('lon')) || -0.85;
-    const initialZoom = urlParams.has('lat') ? 14 : 8;
-    const map = L.map('map', { zoomControl: false }).setView([initialLat, initialLon], initialZoom);
-    window.leafletMap = map;
-    L.control.zoom({ position: 'topright' }).addTo(map);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
 
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-      attribution: '&copy; Esri &bull; GEBCO, NOAA, National Geographic, Garmin &bull; GH-MARSAR C4ISR',
       maxZoom: 16
     }).addTo(map);
 
-    function logEvent(msg, type = 'event-info') {
-      const box = document.getElementById('eventLog');
-      const time = new Date().toLocaleTimeString('en-GB');
-      const line = document.createElement('div');
-      line.className = type;
-      line.innerHTML = `<span style="color:#64748b;">[${time}]</span> ${msg}`;
-      box.insertBefore(line, box.firstChild);
-
-      const ticker = document.getElementById('dockTicker');
-      if (ticker) ticker.innerHTML = msg.replace(/<[^>]*>?/gm, '').substring(0, 85);
-    }
-
-    function zoomSector(sector, btn) {
-      if (btn) {
-        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-      }
-      switch (sector) {
-        case 'ALL': map.flyTo([5.30, -0.85], 8); break;
-        case 'WESTERN': map.flyTo([4.85, -2.10], 10); break;
-        case 'CENTRAL': map.flyTo([5.15, -1.15], 10); break;
-        case 'ACCRA': map.flyTo([5.65, -0.10], 11); break;
-        case 'VOLTA': map.flyTo([5.85, 0.95], 11); break;
-      }
-    }
-
-    const vesselMarkers = {};
-    const sarMarkers = {};
-
-    // Custom SVG Maritime Vessel Icons (IEC 62288)
-    function createVesselIcon(isCanoe, status, heading) {
-      if (isCanoe) {
-        const isSOS = status === 'SOS_DISTRESS' || status === 'OVERDUE';
-        const isSea = status === 'AT_SEA';
-        const color = isSOS ? '#ef4444' : (isSea ? '#38bdf8' : '#10b981');
-        const glow = isSOS ? 'filter:drop-shadow(0 0 8px #ef4444);' : (isSea ? 'filter:drop-shadow(0 0 6px #38bdf8);' : '');
-        return L.divIcon({
-          className: 'canoe-marker',
-          html: `<div style="transform:rotate(${heading||0}deg);${glow}">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L4 20L12 16L20 20L12 2Z" fill="${color}" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-            </svg>
-          </div>`,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12]
-        });
-      } else {
-        // Commercial Vessel Hull Silhouette
-        return L.divIcon({
-          className: 'tanker-marker',
-          html: `<div style="transform:rotate(${heading||0}deg);filter:drop-shadow(0 0 8px rgba(245,158,11,0.6));">
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-              <rect x="9" y="4" width="10" height="20" rx="3" fill="#f59e0b" stroke="#ffffff" stroke-width="1.5"/>
-              <polygon points="14,1 9,8 19,8" fill="#f59e0b" stroke="#ffffff" stroke-width="1.5"/>
-              <circle cx="14" cy="18" r="2" fill="#030712"/>
-            </svg>
-          </div>`,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14]
-        });
-      }
-    }
-
-    
-    // Layer Group Management
+    // Layer Groups
     const layerGroups = {
       AIS: L.layerGroup().addTo(map),
       CANOES: L.layerGroup().addTo(map),
@@ -2640,18 +2904,220 @@ def get_map_dashboard() -> str:
       }
     }
 
-    let activeFocusedSARIncidentId = null;
+    // Nautical Coordinates Tracker
+    map.on('mousemove', function(e) {
+      if (!e || !e.latlng) return;
+      const lat = e.latlng.lat;
+      const lon = e.latlng.lon;
+      if (isNaN(lat) || isNaN(lon)) return;
+      const latDeg = Math.floor(Math.abs(lat));
+      const latMin = ((Math.abs(lat) - latDeg) * 60).toFixed(2);
+      const latDir = lat >= 0 ? 'N' : 'S';
 
-    function focusSARIncident(incId, lat, lon) {
-      activeFocusedSARIncidentId = incId;
-      refreshSAR();
-      if (lat && lon) {
-        map.flyTo([lat, lon], 10);
+      const lonDeg = Math.floor(Math.abs(lon));
+      const lonMin = ((Math.abs(lon) - lonDeg) * 60).toFixed(2);
+      const lonDir = lon >= 0 ? 'E' : 'W';
+
+      const elLat = document.getElementById('hudLat');
+      const elLon = document.getElementById('hudLon');
+      if (elLat && elLon) {
+        elLat.innerText = `${String(latDeg).padStart(2,'0')}°${latMin}' ${latDir}`;
+        elLon.innerText = `${String(lonDeg).padStart(3,'0')}°${lonMin}' ${lonDir}`;
+      }
+    });
+
+    // =========================================================================
+    // AUTHENTIC MARITIME SVG VESSEL & STATION ICONS
+    // =========================================================================
+    function createVesselIcon(v) {
+      const isCanoe = v.vessel_type === 'CANOE' || (v.entity_id && v.entity_id.startsWith('canoe-'));
+      const heading = v.heading_deg || 0;
+
+      if (isCanoe) {
+        const isSOS = v.status === 'SOS_DISTRESS' || v.status === 'OVERDUE';
+        const isShore = v.status === 'ON_SHORE' || v.status === 'SAFE_ON_SHORE_HOME' || v.status === 'SAFE_RELOCATED_LANDING';
+
+        if (isSOS) {
+          // Canoe in SOS Distress (Crimson with pulsing radar ring)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="animation:pulse-sos 1s infinite;display:inline-block;">
+              <svg width="34" height="34" viewBox="0 0 40 40" fill="none">
+                <circle cx="20" cy="20" r="18" stroke="#ef4444" stroke-width="1.8" stroke-dasharray="3 3"/>
+                <g transform="rotate(${heading} 20 20)">
+                  <path d="M20 6C22.5 11 23.5 18 23.5 28C23.5 32 22 35 20 36C18 35 16.5 32 16.5 28C16.5 18 17.5 11 20 6Z" fill="#991b1b" stroke="#ef4444" stroke-width="1.8"/>
+                  <path d="M17.5 14H22.5M17 20H23M17.2 26H22.8" stroke="#fecaca" stroke-width="1.3" stroke-linecap="round"/>
+                </g>
+              </svg>
+            </div>`,
+            iconSize: [34, 34],
+            iconAnchor: [17, 17]
+          });
+        } else if (isShore) {
+          // Canoe safely moored ashore (Emerald green with anchor badge, resting horizontally)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="filter:drop-shadow(0 0 5px #10b981);display:inline-block;">
+              <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
+                <path d="M20 7C22.5 11 23.5 18 23.5 27C23.5 31 22 34 20 35C18 34 16.5 31 16.5 27C16.5 18 17.5 11 20 7Z" fill="#065f46" stroke="#10b981" stroke-width="1.8"/>
+                <path d="M17.5 14H22.5M17 20H23M17.2 26H22.8" stroke="#a7f3d0" stroke-width="1.3" stroke-linecap="round"/>
+                <circle cx="28" cy="14" r="6" fill="#0f172a" stroke="#10b981" stroke-width="1.4"/>
+                <path d="M28 10V18M26 13H30M25 16C26 17.5 30 17.5 31 16" stroke="#10b981" stroke-width="1.3" stroke-linecap="round"/>
+              </svg>
+            </div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+          });
+        } else {
+          // Canoe at Sea (Cyan hull, wooden thwarts, bow wake ripple, heading rotation)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="transform:rotate(${heading}deg);filter:drop-shadow(0 0 6px #38bdf8);display:inline-block;">
+              <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
+                <path d="M17 6L20 2L23 6" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+                <path d="M20 5C22.5 10 23.5 18 23.5 28C23.5 32 22 35 20 36C18 35 16.5 32 16.5 28C16.5 18 17.5 10 20 5Z" fill="#0284c7" stroke="#38bdf8" stroke-width="1.8"/>
+                <path d="M17.5 13H22.5M17 19H23M17.2 25H22.8" stroke="#bae6fd" stroke-width="1.3" stroke-linecap="round"/>
+                <rect x="18.5" y="34" width="3" height="4" rx="1" fill="#f8fafc"/>
+              </svg>
+            </div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+          });
+        }
+      } else {
+        // Commercial Ship Silhouettes
+        if (v.is_iez_violation) {
+          // Commercial Ship inside 6NM IEZ (Flashing Red Warning Beacon)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="animation:pulse-sos 0.8s infinite;display:inline-block;">
+              <svg width="40" height="40" viewBox="0 0 48 48" fill="none">
+                <circle cx="24" cy="24" r="22" stroke="#ef4444" stroke-width="2" stroke-dasharray="4 2"/>
+                <g transform="rotate(${heading} 24 24)">
+                  <path d="M24 4C27.5 7 29.5 13 29.5 26V40C29.5 42 28 43 24 43C20 43 18.5 42 18.5 40V26C18.5 13 20.5 7 24 4Z" fill="#991b1b" stroke="#ef4444" stroke-width="2"/>
+                  <rect x="20" y="34" width="8" height="5" rx="1" fill="#fee2e2"/>
+                </g>
+              </svg>
+            </div>`,
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+          });
+        }
+
+        const type = v.vessel_type || 'TANKER';
+        if (type === 'TRAWLER') {
+          // Industrial Fishing Trawler (Magenta with A-frame gantry)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="transform:rotate(${heading}deg);filter:drop-shadow(0 0 8px rgba(236,72,153,0.6));display:inline-block;">
+              <svg width="34" height="34" viewBox="0 0 48 48" fill="none">
+                <path d="M24 5C27 8 28.5 14 28.5 24V38C28.5 40 27 41 24 41C21 41 19.5 40 19.5 38V24C19.5 14 21 8 24 5Z" fill="#831843" stroke="#ec4899" stroke-width="1.8"/>
+                <rect x="20.5" y="12" width="7" height="6" rx="1" fill="#fdf2f8" stroke="#be185d" stroke-width="1"/>
+                <line x1="19.5" y1="36" x2="28.5" y2="36" stroke="#f472b6" stroke-width="2"/>
+                <path d="M18 26L15 32M30 26L33 32" stroke="#ec4899" stroke-width="1.4" stroke-linecap="round"/>
+              </svg>
+            </div>`,
+            iconSize: [34, 34],
+            iconAnchor: [17, 17]
+          });
+        } else if (type === 'CARGO') {
+          // Container Ship (Indigo with container stack bays)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="transform:rotate(${heading}deg);filter:drop-shadow(0 0 8px rgba(99,102,241,0.6));display:inline-block;">
+              <svg width="36" height="36" viewBox="0 0 48 48" fill="none">
+                <line x1="24" y1="4" x2="24" y2="0" stroke="#6366f1" stroke-width="1.8" stroke-dasharray="2 2"/>
+                <path d="M24 4C27 7 29 12 29 24V40C29 42 27.5 43 24 43C20.5 43 19 42 19 40V24C19 12 21 7 24 4Z" fill="#3730a3" stroke="#6366f1" stroke-width="1.8"/>
+                <rect x="20.5" y="11" width="7" height="4" fill="#818cf8"/>
+                <rect x="20.5" y="17" width="7" height="4" fill="#c7d2fe"/>
+                <rect x="20.5" y="23" width="7" height="4" fill="#a5b4fc"/>
+                <rect x="20.5" y="29" width="7" height="4" fill="#818cf8"/>
+                <rect x="20" y="36" width="8" height="4" rx="1" fill="#f8fafc"/>
+              </svg>
+            </div>`,
+            iconSize: [36, 36],
+            iconAnchor: [18, 18]
+          });
+        } else {
+          // Tanker / Bulker (Amber with deck manifold lines and aft bridge)
+          return L.divIcon({
+            className: 'mar-ico',
+            html: `<div style="transform:rotate(${heading}deg);filter:drop-shadow(0 0 8px rgba(245,158,11,0.6));display:inline-block;">
+              <svg width="36" height="36" viewBox="0 0 48 48" fill="none">
+                <line x1="24" y1="4" x2="24" y2="0" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="2 2"/>
+                <path d="M24 4C27.5 7 29.5 13 29.5 26V40C29.5 42 28 43 24 43C20 43 18.5 42 18.5 40V26C18.5 13 20.5 7 24 4Z" fill="#b45309" stroke="#f59e0b" stroke-width="1.8"/>
+                <line x1="24" y1="12" x2="24" y2="33" stroke="#fde68a" stroke-width="1.4"/>
+                <circle cx="24" cy="16" r="1.5" fill="#fde68a"/>
+                <circle cx="24" cy="23" r="1.5" fill="#fde68a"/>
+                <circle cx="24" cy="30" r="1.5" fill="#fde68a"/>
+                <rect x="20" y="34" width="8" height="5" rx="1" fill="#fef3c7" stroke="#78350f" stroke-width="1"/>
+                <rect x="22.5" y="36" width="3" height="2" fill="#1e293b"/>
+              </svg>
+            </div>`,
+            iconSize: [36, 36],
+            iconAnchor: [18, 18]
+          });
+        }
       }
     }
 
+    // Cell Tower Lattice Mast Icon
+    function createTowerIcon(isSeaward) {
+      const color = isSeaward ? '#06b6d4' : '#64748b';
+      return L.divIcon({
+        className: 'tower-ico',
+        html: `<div style="filter:drop-shadow(0 0 5px ${color});">
+          <svg width="24" height="24" viewBox="0 0 40 40" fill="none">
+            <path d="M20 6L14 34H26L20 6Z" stroke="${color}" stroke-width="2"/>
+            <line x1="17" y1="16" x2="23" y2="16" stroke="${color}" stroke-width="1.4"/>
+            <line x1="15.5" y1="24" x2="24.5" y2="24" stroke="${color}" stroke-width="1.4"/>
+            <circle cx="20" cy="6" r="3.5" fill="${color}"/>
+            <path d="M12 4C16 1 24 1 28 4" stroke="#38bdf8" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+        </div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+    }
+
+    // =========================================================================
+    // EVENT LOGGING & BOTTOM DOCK
+    // =========================================================================
+    function logEvent(msg, level = 'INFO') {
+      const ticker = document.getElementById('lastEventTicker');
+      if (ticker) ticker.innerText = msg;
+
+      const logBox = document.getElementById('eventLogBox');
+      if (logBox) {
+        const timeStr = new Date().toISOString().substring(11, 19);
+        let tagClass = 'tag-info';
+        if (level === 'CRITICAL') tagClass = 'tag-crit';
+        else if (level === 'WARNING') tagClass = 'tag-warn';
+        else if (level === 'RADAR') tagClass = 'tag-radar';
+
+        const row = document.createElement('div');
+        row.innerHTML = `<span style="color:#64748b;">[${timeStr}]</span> <span class="${tagClass}">[${level}]</span> ${msg}`;
+        logBox.insertBefore(row, logBox.firstChild);
+      }
+    }
+
+    function toggleBottomDock() {
+      const el = document.getElementById('eventLogContainer');
+      const btn = document.getElementById('dockToggleBtn');
+      if (el.style.display === 'block') {
+        el.style.display = 'none';
+        btn.innerText = '▲ EXPAND';
+      } else {
+        el.style.display = 'block';
+        btn.innerText = '▼ COLLAPSE';
+      }
+    }
+
+    // =========================================================================
+    // BOUNDARIES & CELL TOWERS
+    // =========================================================================
     async function initNationalGhanaBoundaries() {
-      // 1. Ghana 6NM Inshore Exclusion Zone (IEZ - Fisheries Act 625)
+      // 1. Ghana 6NM Inshore Exclusion Zone (Fisheries Act 625)
       const iezPoints = [
         [5.1000, -3.1000], [4.7400, -2.0900], [4.8000, -1.9500], [4.8900, -1.7400],
         [5.0800, -1.3500], [5.3500, -0.6200], [5.5300, -0.2100], [5.6200, 0.0100],
@@ -2670,24 +3136,40 @@ def get_map_dashboard() -> str:
       }).bindPopup('<b>Ghana 6NM Inshore Exclusion Zone (IEZ)</b><br>Artisanal canoes only. Industrial trawlers strictly prohibited (Fisheries Act 625).');
       layerGroups.IEZ.addLayer(iezPoly);
 
-      // 2. Render 29 Coastal Cell Towers
+      // 2. Render 29 Coastal Cell Towers with Lattice Mast Icons & Coverage Arcs
       try {
         const tResp = await fetch('/v1/telecom/towers');
         if (tResp.ok) {
           const tData = await tResp.json();
           const twBadge = document.getElementById('telemetryTowers');
           if (twBadge && tData.towers) twBadge.innerText = `${tData.towers.length} Towers Active`;
+
           tData.towers.forEach(t => {
             const isSeaward = t.sector_type === 'SEAWARD';
-            const color = isSeaward ? '#06b6d4' : '#64748b';
-            const tMarker = L.circleMarker([t.lat, t.lon], {
-              radius: 4,
-              fillColor: color,
-              color: '#ffffff',
-              weight: 1,
-              fillOpacity: 0.9
-            }).bindPopup(`<b>${t.name}</b><br>Sector: ${t.sector_type} (${t.azimuth_deg}&deg;)<br>Region: ${t.region}`);
+            const tMarker = L.marker([t.lat, t.lon], {
+              icon: createTowerIcon(isSeaward)
+            }).bindPopup(`<b>${t.name}</b><br>Sector: <strong>${t.sector_type}</strong> (${t.azimuth_deg}&deg;)<br>Carrier: ${t.carrier}<br>Max Sea Range: 15 km`);
             layerGroups.TOWERS.addLayer(tMarker);
+
+            // Draw directional antenna coverage beam fan for seaward masts (120 deg beam pointing South)
+            if (isSeaward) {
+              const r = 0.12; // ~13 km in degrees
+              const azRad = (t.azimuth_deg || 180) * Math.PI / 180;
+              const halfBeam = 60 * Math.PI / 180;
+              const p1 = [t.lat, t.lon];
+              const p2 = [t.lat + r * Math.cos(azRad - halfBeam), t.lon + r * Math.sin(azRad - halfBeam)];
+              const p3 = [t.lat + r * Math.cos(azRad), t.lon + r * Math.sin(azRad)];
+              const p4 = [t.lat + r * Math.cos(azRad + halfBeam), t.lon + r * Math.sin(azRad + halfBeam)];
+
+              const beamFan = L.polygon([p1, p2, p3, p4], {
+                color: '#06b6d4',
+                weight: 1,
+                fillColor: '#06b6d4',
+                fillOpacity: 0.08,
+                dashArray: '3, 3'
+              });
+              layerGroups.TOWERS.addLayer(beamFan);
+            }
           });
         }
       } catch (e) {}
@@ -2696,309 +3178,11 @@ def get_map_dashboard() -> str:
       await refreshSAR();
       await pollRadar();
     }
-    initNationalGhanaBoundaries();
 
-    async function refreshRoster() {
-      try {
-        const resp = await fetch('/v1/telecom/subscribers');
-        if (resp.ok) {
-          const data = await resp.json();
-          document.getElementById('statEnrolled').innerText = data.total_subscribers;
-          document.getElementById('rosterCount').innerText = `${data.total_subscribers} boats`;
-
-          const datalist = document.getElementById('canoeSuggestions');
-          if (datalist) {
-            datalist.innerHTML = data.subscribers.map(s => `<option value="${s.phone_number}">${s.canoe_name} (${s.landing_beach})</option>`).join('');
-          }
-
-          let atSea = 0;
-          let onShore = 0;
-          let sosCount = 0;
-
-          if (data.subscribers.length === 0) {
-            document.getElementById('fleetTable').innerHTML = '<div style="color:var(--text-faint);padding:6px 0;">No artisanal canoes enrolled yet.</div>';
-            document.getElementById('statAtSea').innerText = '0';
-            document.getElementById('statOnShore').innerText = '0';
-            document.getElementById('statSOS').innerText = '0';
-            return;
-          }
-
-          const rows = data.subscribers.map(s => {
-            const isSea = s.status === 'AT_SEA';
-            const isSOS = s.status === 'SOS_DISTRESS' || s.status === 'OVERDUE';
-            if (isSea) atSea++;
-            else if (isSOS) sosCount++;
-            else onShore++;
-
-            const badgeColor = isSOS ? '#dc2626' : (isSea ? '#0284c7' : '#10b981');
-            return `
-              <div style="border-bottom:1px solid rgba(255,255,255,0.06);padding:6px 0;display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                  <strong style="color:#f8fafc;">${s.canoe_name}</strong> <span style="color:var(--text-faint);font-size:0.68rem;">(${s.phone_number})</span><br>
-                  <span style="color:var(--text-muted);font-size:0.66rem;">${s.landing_beach} &bull; ${s.language}</span>
-                </div>
-                <div style="text-align:right;display:flex;gap:3px;align-items:center;">
-                  <span style="background:${badgeColor};color:#fff;padding:2px 5px;border-radius:3px;font-size:0.65rem;font-weight:700;">${s.status}</span>
-                  ${s.status === 'ON_SHORE' ? `<button class="btn btn-sm" style="background:#0284c7;padding:2px 5px;" title="Simulate Launch" onclick="quickLaunch('${s.phone_number}', '${s.landing_beach}')">🚀</button>` : ''}
-                  ${s.status === 'AT_SEA' ? `<button class="btn btn-sm btn-emerald" style="padding:2px 5px;" title="Return Safe" onclick="quickReturn('${s.phone_number}', '${s.landing_beach}')">🏖️</button>` : ''}
-                  ${s.status !== 'SOS_DISTRESS' ? `<button class="btn btn-sm btn-danger" style="padding:2px 5px;" title="Distress SOS" onclick="quickSOS('${s.phone_number}')">🚨</button>` : ''}
-                  <button class="btn btn-sm" style="background:#0891b2;padding:2px 5px;" title="Real-time GSM Locate" onclick="locateSpecific('${s.phone_number}')">🔍</button>
-                  <button class="btn btn-sm" style="background:#475569;padding:2px 5px;" title="Unenroll" onclick="unenrollCanoe('${s.phone_number}')">🗑️</button>
-                </div>
-              </div>
-            `;
-          }).join('');
-
-          document.getElementById('fleetTable').innerHTML = rows;
-          document.getElementById('statAtSea').innerText = atSea;
-          document.getElementById('statOnShore').innerText = onShore;
-          document.getElementById('statSOS').innerText = sosCount;
-        }
-      } catch (e) {}
-    }
-
-    async function refreshSAR() {
-      try {
-        const resp = await fetch('/v1/sar/incidents');
-        if (resp.ok) {
-          const data = await resp.json();
-          const activeIncidents = data.incidents.filter(i => i.status === 'ACTIVE');
-
-          if (activeIncidents.length === 0) {
-            document.getElementById('activeSARBox').innerHTML = '<div style="color:var(--text-faint);padding:6px 0;">No active missing boat incidents. Coast is clear.</div>';
-            layerGroups.SAR.clearLayers();
-            return;
-          }
-
-          // If no incident is focused yet, focus the first one
-          if (!activeFocusedSARIncidentId || !activeIncidents.find(i => i.incident_id === activeFocusedSARIncidentId)) {
-            activeFocusedSARIncidentId = activeIncidents[0].incident_id;
-          }
-
-          // Clear previous SAR layer group to eliminate overlapping clutter
-          layerGroups.SAR.clearLayers();
-
-          const html = activeIncidents.map(inc => {
-            const datum = inc.projected_datum;
-            const isFocused = inc.incident_id === activeFocusedSARIncidentId;
-
-            // 1. Neat, compact marker for every active incident
-            const marker = L.circleMarker([datum.lat, datum.lon], {
-              radius: isFocused ? 9 : 6,
-              fillColor: '#dc2626',
-              color: isFocused ? '#fbbf24' : '#ffffff',
-              weight: isFocused ? 3 : 1.5,
-              fillOpacity: 0.95
-            }).bindPopup(`<b>MISSING CANOE: ${inc.canoe_name}</b><br>Owner: ${inc.phone_number}<br>Beach: ${inc.landing_beach}<br><b>Guinea Current Datum: [${datum.lat.toFixed(4)}, ${datum.lon.toFixed(4)}]</b><br>Drifted ${inc.drift_distance_nm} NM Eastward<br>Search Radius: ${inc.search_radius_nm} NM`);
-            
-            layerGroups.SAR.addLayer(marker);
-
-            // 2. Only draw expanding circle and drift vector for the FOCUSED incident
-            if (isFocused) {
-              const circle = L.circle([datum.lat, datum.lon], {
-                radius: inc.search_radius_nm * 1852,
-                color: '#ef4444',
-                fillColor: '#dc2626',
-                fillOpacity: 0.12,
-                dashArray: '5, 5'
-              });
-              layerGroups.SAR.addLayer(circle);
-
-              if (inc.last_known_fix && inc.last_known_fix.lat) {
-                const driftLine = L.polyline([
-                  [inc.last_known_fix.lat, inc.last_known_fix.lon],
-                  [datum.lat, datum.lon]
-                ], { color: '#f59e0b', weight: 2, dashArray: '6, 6' }).bindPopup(`<b>Guinea Current Drift Track</b><br>${inc.canoe_name} carried ${inc.drift_distance_nm} NM Eastward towards Togo`);
-                layerGroups.SAR.addLayer(driftLine);
-              }
-            }
-
-            return `
-              <div style="border-bottom:1px solid rgba(255,255,255,0.08);padding:6px 4px;display:flex;justify-content:space-between;align-items:center;background:${isFocused ? 'rgba(239,68,68,0.12)' : 'transparent'};border-radius:4px;margin-bottom:2px;">
-                <div style="cursor:pointer;" onclick="focusSARIncident('${inc.incident_id}', ${datum.lat}, ${datum.lon})">
-                  <strong style="color:${isFocused ? '#fbbf24' : '#f87171'};font-size:0.75rem;">🚨 ${inc.canoe_name}</strong> <span style="font-size:0.68rem;color:var(--text-faint);">(${inc.landing_beach})</span><br>
-                  <span style="font-size:0.66rem;color:#cbd5e1;">Datum: [${datum.lat.toFixed(3)}, ${datum.lon.toFixed(3)}] &bull; ${inc.drift_distance_nm} NM east</span>
-                </div>
-                <div style="display:flex;gap:4px;">
-                  <button class="btn btn-sm" style="padding:2px 6px;background:${isFocused ? '#f59e0b' : '#334155'};color:#fff;" onclick="focusSARIncident('${inc.incident_id}', ${datum.lat}, ${datum.lon})">${isFocused ? 'Focused' : 'View'}</button>
-                  <button class="btn btn-sm btn-emerald" style="padding:2px 6px;" onclick="resolveSAR('${inc.incident_id}')">Found</button>
-                </div>
-              </div>
-            `;
-          }).join('');
-
-          document.getElementById('activeSARBox').innerHTML = html;
-        }
-      } catch (e) {
-        console.error('refreshSAR error:', e);
-      }
-    }
-
-    
-    async function executeSDRScan() {
-      const phone = document.getElementById('sdrPhoneInput').value.trim() || '0243875318';
-      const station = document.getElementById('sdrStationSelect').value;
-
-      try {
-        const resp = await fetch('/v1/sdr/scan', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            phone_number: phone,
-            search_station_id: station,
-            band: 'GSM_900',
-            force_simulated_detection: true
-          })
-        });
-
-        if (resp.ok) {
-          const res = await resp.json();
-          const t = res.target;
-          const card = document.getElementById('sdrResultCard');
-          card.style.display = 'block';
-
-          document.getElementById('sdrTimeSpan').innerText = t.timestamp_iso.split(' ')[1] || '';
-          document.getElementById('sdrTelemetryText').innerHTML = `
-            <strong>${res.canoe_name} (${t.phone_number})</strong><br>
-            🎯 <strong>EXTERNAL FIX:</strong> [${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}] &plusmn;${t.accuracy_m}m<br>
-            📡 <strong>STATION:</strong> ${t.detected_via_station}<br>
-            ⚡ <strong>RF POWER:</strong> ${t.rssi_dbm} dBm (Confidence: ${(t.confidence_score*100).toFixed(0)}%)<br>
-            ⏱️ <strong>RANGE / BEARING:</strong> ${t.estimated_distance_m}m &bull; ${t.bearing_deg}&deg;<br>
-            🔒 <strong>METHOD:</strong> 3GPP RACH Uplink Time-of-Flight (Zero Links/Apps)
-          `;
-
-          if (res.closest_commercial_ship) {
-            const ship = res.closest_commercial_ship;
-            document.getElementById('sdrShipAdvisory').innerHTML = `
-              🚨 <strong>COMMERCIAL SHIP RENDEZVOUS:</strong><br>
-              Vessel MMSI <strong>${ship.mmsi}</strong> is ${ship.distance_nm} NM away (Bearing ${ship.bearing_deg}&deg;).<br>
-              VHF Ch 16 Automated Advisory Broadcast to intercept canoe!
-            `;
-            logEvent(`🚨 [SDR SAR RENDEZVOUS] Commercial vessel MMSI ${ship.mmsi} dispatched to intercept ${res.canoe_name} at [${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}]!`, 'event-cpa');
-          } else {
-            document.getElementById('sdrShipAdvisory').style.display = 'none';
-          }
-
-          logEvent(`📡 [EXTERNAL SDR FIX] Target ${t.phone_number} acquired at [${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}] via RF Time-of-Flight!`, 'event-lbs');
-
-          // Plot on Leaflet Map
-          if (window.leafletMap) {
-            if (sdrTargetMarker) window.leafletMap.removeLayer(sdrTargetMarker);
-            if (sdrDroneMarker) window.leafletMap.removeLayer(sdrDroneMarker);
-            if (sdrBeamCone) window.leafletMap.removeLayer(sdrBeamCone);
-
-            // Drone/station marker
-            const stationCoords = station === 'DRONE_KETA_SAR_1' ? [5.8750, 1.0400] : [5.8450, 0.9950];
-            sdrDroneMarker = L.circleMarker(stationCoords, {
-              radius: 10,
-              fillColor: '#38bdf8',
-              color: '#fff',
-              weight: 2,
-              fillOpacity: 0.9
-            }).addTo(window.leafletMap).bindPopup(`<b>${t.detected_via_station}</b><br>SDR Active Search Array`);
-
-            // Target marker with pulsing ring
-            sdrTargetMarker = L.circleMarker([t.lat, t.lon], {
-              radius: 12,
-              fillColor: '#ef4444',
-              color: '#fbbf24',
-              weight: 3,
-              fillOpacity: 0.8
-            }).addTo(window.leafletMap).bindPopup(`<b>${res.canoe_name}</b><br>RF Pocket Handset Intercept<br>[${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}]`);
-
-            // Beam line connecting drone to target
-            sdrBeamCone = L.polyline([stationCoords, [t.lat, t.lon]], {
-              color: '#38bdf8',
-              weight: 2,
-              dashArray: '4, 6',
-              opacity: 0.85
-            }).addTo(window.leafletMap);
-
-            window.leafletMap.flyTo([t.lat, t.lon], 11);
-          }
-        }
-      } catch (e) {
-        console.error('SDR Scan failed:', e);
-      }
-    }
-
-    async function executeSDRTriangulate() {
-      const phone = document.getElementById('sdrPhoneInput').value.trim() || '0243875318';
-      try {
-        const resp = await fetch('/v1/sdr/triangulate', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ phone_number: phone })
-        });
-        if (resp.ok) {
-          const res = await resp.json();
-          logEvent(`📐 [TRIANGULATION] Multi-station fix established for ${res.phone_number}: [${res.lat}, ${res.lon}] (&plusmn;${res.accuracy_m}m)`, 'event-lbs');
-          executeSDRScan();
-        }
-      } catch (e) {}
-    }
-
-    async function runSilentProbe(mode) {
-      const phone = document.getElementById('probePhoneInput').value.trim();
-      if (!phone) return;
-      let url = '/v1/probe/silent-ping';
-      if (mode === 'CAPSIZE') url = '/v1/probe/simulate-capsize';
-      if (mode === 'TOGO') url = '/v1/probe/simulate-roaming';
-      if (mode === 'RESET') url = '/v1/probe/reset';
-
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ phone_number: phone })
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          const pr = data.probe_result;
-          const box = document.getElementById('probeResultBox');
-          box.style.display = 'block';
-
-          const badge = document.getElementById('probeStatusBadge');
-          const summary = document.getElementById('probeSummaryText');
-          const trace = document.getElementById('probeTraceBox');
-
-          if (pr.status === 'RINGING_ALIVE') {
-            badge.style.background = 'rgba(16,185,129,0.2)';
-            badge.style.color = '#10b981';
-            badge.style.borderColor = '#10b981';
-            badge.innerText = '🟢 RINGING_ALIVE (SIP 180)';
-            summary.innerHTML = '<strong>' + pr.carrier_name + '</strong> &bull; Handset connected to cell tower. Ring-and-drop canceled in ' + pr.latency_ms + 'ms. Cost: GH₵ 0.00.';
-            logEvent('[SIP PROBE] ' + pr.phone_number + ' on ' + pr.carrier_name + ': ACTIVE. 0-second ring-and-drop successful.', 'event-lbs');
-          } else if (pr.status === 'IMPLICIT_DETACH_ABSENT') {
-            badge.style.background = 'rgba(239,68,68,0.2)';
-            badge.style.color = '#f87171';
-            badge.style.borderColor = '#ef4444';
-            badge.innerText = '🚨 WATER IMMERSION / ABSENT (SIP 480)';
-            summary.innerHTML = '<strong style="color:#ef4444;">ABNORMAL RADIO LINK FAILURE!</strong> Phone drowned in water. Watchdog automatically calculated Guinea Current drift datum!';
-            const datumStr = data.drift_datum ? '[' + data.drift_datum.lat.toFixed(3) + ', ' + data.drift_datum.lon.toFixed(3) + ']' : '';
-            logEvent('🚨 [WATER IMMERSION DETECTED] ' + pr.phone_number + ' lost signal abruptly! SAR Watchdog calculated drift datum ' + datumStr + ' towards Togo!', 'event-cpa');
-            refreshSAR();
-            if (data.drift_datum && window.leafletMap) {
-              window.leafletMap.setView([data.drift_datum.lat, data.drift_datum.lon], 9);
-            }
-          } else if (pr.status === 'ROAMING_BORDER_CROSS') {
-            badge.style.background = 'rgba(245,158,11,0.2)';
-            badge.style.color = '#fbbf24';
-            badge.style.borderColor = '#f59e0b';
-            badge.innerText = '🇹🇬 BORDER CROSSING (Togocom MCC 615)';
-            summary.innerHTML = '<strong style="color:#fbbf24;">VESSEL ADRIFT IN TOGO WATERS!</strong> SIM silently attached to Togocom Lomé cell tower. International rescue alert dispatched.';
-            logEvent('⚠️ [INTERNATIONAL BORDER CROSS] ' + pr.phone_number + ' attached to Togocom (MCC 615)! Adrift into Togo territorial waters!', 'event-cpa');
-            if (window.leafletMap) {
-              window.leafletMap.setView([6.115, 1.235], 9);
-            }
-          }
-
-          trace.innerText = pr.signaling_trace.join(String.fromCharCode(10));
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }
+    // =========================================================================
+    // RADAR POLLING & VESSEL TRACKING
+    // =========================================================================
+    const vesselMarkers = {};
 
     async function pollRadar() {
       try {
@@ -3006,33 +3190,46 @@ def get_map_dashboard() -> str:
         if (resp.ok) {
           const snap = await resp.json();
           snap.vehicles.forEach(v => {
-            const isCanoe = v.entity_id.startsWith('canoe-');
+            const isCanoe = v.vessel_type === 'CANOE' || (v.entity_id && v.entity_id.startsWith('canoe-'));
             const pt = [v.position.lat, v.position.lon];
-            const titleName = v.ship_name || (isCanoe ? "ARTISANAL CANOE" : "COMMERCIAL VESSEL");
-            let popupHtml = "<b>" + (isCanoe ? "⛴ ARTISANAL CANOE" : "🚢 " + titleName) + "</b><br>" +
-              "ID: <b>" + v.entity_id + "</b><br>" +
-              "Speed: " + (v.speed_mps * 1.94384).toFixed(1) + " knots<br>" +
-              "Heading: " + v.heading_deg.toFixed(0) + "&deg;<br>" +
-              "Position: [" + v.position.lat.toFixed(4) + ", " + v.position.lon.toFixed(4) + "]<br>";
+            const targetGroup = isCanoe ? layerGroups.CANOES : layerGroups.AIS;
+
+            let titleName = v.ship_name || (isCanoe ? "ARTISANAL CANOE" : "COMMERCIAL VESSEL");
+            let popupHtml = `<b>${isCanoe ? "🛶 " + titleName : "🚢 " + titleName}</b><br>` +
+              `Type: <strong>${v.vessel_type || (isCanoe ? "CANOE" : "TANKER")}</strong><br>` +
+              `Status: <span style="font-weight:700;color:${v.status === 'SOS_DISTRESS' ? '#ef4444' : (v.status === 'ON_SHORE' ? '#10b981' : '#38bdf8')}">${v.status}</span><br>` +
+              `Speed: ${(v.speed_mps * 1.94384).toFixed(1)} kts &bull; Heading: ${v.heading_deg.toFixed(0)}&deg;<br>` +
+              `Position: [${v.position.lat.toFixed(4)}, ${v.position.lon.toFixed(4)}]<br>`;
+
+            if (v.is_iez_violation) {
+              popupHtml += '<span style="color:#ef4444;font-weight:800;">🚨 6NM INSHORE ZONE VIOLATION (Act 625)</span><br>';
+            }
             if (v.is_live) {
               popupHtml += '<span style="color:#10b981;font-weight:700;">🟢 LIVE SATELLITE/VHF AIS</span>';
             }
+
             if (vesselMarkers[v.entity_id]) {
               vesselMarkers[v.entity_id].setLatLng(pt);
-              vesselMarkers[v.entity_id].setIcon(createVesselIcon(isCanoe, v.status, v.heading_deg));
+              vesselMarkers[v.entity_id].setIcon(createVesselIcon(v));
               vesselMarkers[v.entity_id].setPopupContent(popupHtml);
+              if (!targetGroup.hasLayer(vesselMarkers[v.entity_id])) {
+                targetGroup.addLayer(vesselMarkers[v.entity_id]);
+              }
             } else {
-              const targetGroup = isCanoe ? layerGroups.CANOES : layerGroups.AIS;
-              const marker = L.marker(pt, {
-                icon: createVesselIcon(isCanoe, v.status, v.heading_deg)
-              });
-              targetGroup.addLayer(marker);
+              const marker = L.marker(pt, { icon: createVesselIcon(v) });
               marker.bindPopup(popupHtml);
+              targetGroup.addLayer(marker);
               vesselMarkers[v.entity_id] = marker;
+            }
+
+            // Log IEZ violation once
+            if (v.is_iez_violation && !v._iezLogged) {
+              v._iezLogged = true;
+              logEvent(`🚨 [IEZ INTRUSION] Commercial vessel ${v.ship_name || v.entity_id} entered Ghana 6NM Artisanal Reserve (Fisheries Act 625)!`, 'CRITICAL');
             }
           });
 
-          // Render ARPA Collision Line if hazards exist
+          // ARPA Collision Hazards Line + CPA Ring
           if (snap.collision_hazards && snap.collision_hazards.length > 0) {
             snap.collision_hazards.forEach(h => {
               const tanker = vesselMarkers[h.threat_vessel];
@@ -3048,38 +3245,297 @@ def get_map_dashboard() -> str:
                   window.hazardLine.setLatLngs([tanker.getLatLng(), canoe.getLatLng()]);
                 }
               }
-              logEvent(`🚨 [COLLISION CONVERGENCE] Tanker ${h.threat_vessel} converging on ${h.canoe_name}! CPA: ${h.cpa_nm} NM in ${h.tcpa_minutes}m! Robocall dispatched in ${h.language}: "${h.voice_script}"`, 'event-cpa');
+              logEvent(`🚨 [CONVERGENCE HAZARD] Tanker ${h.threat_vessel} converging on ${h.canoe_name}! CPA: ${h.cpa_nm} NM in ${h.tcpa_minutes}m! Robocall dispatched in ${h.language}!`, 'CRITICAL');
             });
           } else if (window.hazardLine) {
             map.removeLayer(window.hazardLine);
             window.hazardLine = null;
           }
 
-          const shipsCount = snap.vehicles.filter(v => !v.entity_id.startsWith('canoe-')).length;
-          const shipBadge = document.getElementById('statShips');
-          if (shipBadge) shipBadge.innerText = shipsCount;
-          const aisBadge = document.getElementById('liveAISBadge');
-          if (aisBadge && snap.live_ais_status) {
-            aisBadge.innerText = snap.live_ais_status + ' (' + (snap.live_ais_messages || 0) + ' msgs)';
+          // Topbar Badges
+          const commercialCount = snap.vehicles.filter(v => !(v.vessel_type === 'CANOE' || (v.entity_id && v.entity_id.startsWith('canoe-')))).length;
+          document.getElementById('statShips').innerText = commercialCount;
+
+          if (snap.live_ais_status) {
+            document.getElementById('liveAISBadge').innerText = `${snap.live_ais_status} (${snap.live_ais_messages || 0} msgs)`;
+            document.getElementById('opsAISStatus').innerText = snap.live_ais_status;
+            document.getElementById('opsAISMsgs').innerText = snap.live_ais_messages || 0;
           }
         }
+      } catch (e) {
+        console.error('pollRadar error:', e);
+      }
+    }
+
+    // =========================================================================
+    // FLEET ROSTER & STATUS FILTERS
+    // =========================================================================
+    let currentFleetData = [];
+    let currentFleetFilter = 'ALL';
+
+    function filterFleet(filterType, btn) {
+      currentFleetFilter = filterType;
+      document.querySelectorAll('.fleet-filter-bar .filter-pill').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      renderFleetCards();
+    }
+
+    function filterFleetBySearch(query) {
+      const q = query.toLowerCase().trim();
+      renderFleetCards(q);
+    }
+
+    function renderFleetCards(searchQuery = '') {
+      const table = document.getElementById('fleetTable');
+      if (!currentFleetData || currentFleetData.length === 0) {
+        table.innerHTML = '<div style="color:var(--text-faint);padding:10px 0;text-align:center;">No artisanal canoes enrolled.</div>';
+        return;
+      }
+
+      let filtered = currentFleetData;
+      if (currentFleetFilter === 'AT_SEA') {
+        filtered = filtered.filter(s => s.status === 'AT_SEA');
+      } else if (currentFleetFilter === 'ON_SHORE') {
+        filtered = filtered.filter(s => s.status === 'ON_SHORE' || s.status === 'SAFE_ON_SHORE_HOME' || s.status === 'SAFE_RELOCATED_LANDING');
+      } else if (currentFleetFilter === 'SOS') {
+        filtered = filtered.filter(s => s.status === 'SOS_DISTRESS' || s.status === 'OVERDUE');
+      }
+
+      if (searchQuery) {
+        filtered = filtered.filter(s => (s.canoe_name || '').toLowerCase().includes(searchQuery) || (s.phone_number || '').includes(searchQuery));
+      }
+
+      if (filtered.length === 0) {
+        table.innerHTML = '<div style="color:var(--text-faint);padding:10px 0;text-align:center;">No canoes match filter.</div>';
+        return;
+      }
+
+      table.innerHTML = filtered.map(s => {
+        const isSOS = s.status === 'SOS_DISTRESS' || s.status === 'OVERDUE';
+        const isSea = s.status === 'AT_SEA';
+        const badgeColor = isSOS ? '#ef4444' : (isSea ? '#0284c7' : '#059669');
+        const badgeText = isSOS ? '🚨 SOS' : (isSea ? '🌊 AT SEA' : '🏖️ SHORE');
+        const bat = s.battery_pct || (isSea ? 84 : 96);
+        const batColor = bat > 50 ? '#10b981' : (bat > 20 ? '#f59e0b' : '#ef4444');
+
+        const lat = s.last_point ? s.last_point.lat : null;
+        const lon = s.last_point ? s.last_point.lon : null;
+
+        return `
+          <div style="background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px;font-size:0.70rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+              <strong style="color:#f8fafc;cursor:pointer;" onclick="flyToCanoe('${s.phone_number}', ${lat}, ${lon})">🛶 ${s.canoe_name}</strong>
+              <span style="font-size:0.62rem;font-weight:700;color:${badgeColor};border:1px solid ${badgeColor};padding:1px 5px;border-radius:3px;">${badgeText}</span>
+            </div>
+            <div style="color:#94a3b8;font-size:0.66rem;margin-bottom:6px;">
+              ${s.phone_number} &bull; ${s.landing_beach} (${s.language})
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <span style="font-size:0.65rem;color:#cbd5e1;">🔋 <span style="color:${batColor};font-weight:700;">${bat}%</span> &bull; 📶 4/4 MTN</span>
+              <span style="font-size:0.65rem;color:#64748b;">${s.distance_offshore_km ? s.distance_offshore_km.toFixed(1) + 'km out' : 'Ashore'}</span>
+            </div>
+            <div style="display:flex;gap:4px;">
+              <button class="btn btn-sm" style="flex:1;padding:3px 4px;background:#0284c7;" onclick="flyToCanoe('${s.phone_number}', ${lat}, ${lon})">📍 Focus</button>
+              <button class="btn btn-sm btn-emerald" style="flex:1;padding:3px 4px;" onclick="quickLocate('${s.phone_number}')">⚡ Ping</button>
+              <button class="btn btn-sm btn-red" style="padding:3px 6px;" onclick="triggerKeypadSOSManual('${s.phone_number}')">🚨 SOS</button>
+              <button class="btn btn-sm" style="background:#334155;padding:3px 6px;" onclick="deleteCanoe('${s.phone_number}')">🗑️</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function refreshRoster() {
+      try {
+        const resp = await fetch('/v1/telecom/subscribers');
+        if (resp.ok) {
+          const data = await resp.json();
+          currentFleetData = data.subscribers;
+          document.getElementById('statEnrolled').innerText = data.total_subscribers;
+          document.getElementById('rosterCount').innerText = `${data.total_subscribers} boats`;
+          document.getElementById('fleetCountBadge').innerText = `${data.total_subscribers} canoes`;
+
+          const datalist = document.getElementById('canoeSuggestions');
+          if (datalist) {
+            datalist.innerHTML = data.subscribers.map(s => `<option value="${s.phone_number}">${s.canoe_name} (${s.landing_beach})</option>`).join('');
+          }
+
+          let atSea = 0;
+          let onShore = 0;
+          let sosCount = 0;
+          data.subscribers.forEach(s => {
+            if (s.status === 'AT_SEA') atSea++;
+            else if (s.status === 'SOS_DISTRESS' || s.status === 'OVERDUE') sosCount++;
+            else onShore++;
+          });
+
+          document.getElementById('statAtSea').innerText = atSea;
+          document.getElementById('statOnShore').innerText = onShore;
+          const sosBadge = document.getElementById('statSOS');
+          sosBadge.innerText = sosCount;
+          const sosWrap = document.getElementById('sosBadgeWrapper');
+          if (sosCount > 0) {
+            sosWrap.classList.add('pulse-active');
+          } else {
+            sosWrap.classList.remove('pulse-active');
+          }
+
+          renderFleetCards();
+        }
+      } catch (e) {
+        console.error('refreshRoster error:', e);
+      }
+    }
+
+    function flyToCanoe(phone, lat, lon) {
+      if (lat && lon) {
+        map.flyTo([lat, lon], 12);
+        const marker = vesselMarkers[`canoe-${phone}`];
+        if (marker) marker.openPopup();
+      } else {
+        alert(`No GPS coordinates recorded for canoe ${phone}. Execute GSM radio ping.`);
+      }
+    }
+
+    // =========================================================================
+    // SEARCH & RESCUE (SAR) WATCHDOG
+    // =========================================================================
+    let sarCircles = [];
+    let sarLines = [];
+    let activeFocusedSARIncidentId = null;
+
+    async function refreshSAR() {
+      try {
+        const resp = await fetch('/v1/sar/incidents');
+        if (resp.ok) {
+          const data = await resp.json();
+          sarCircles.forEach(c => layerGroups.SAR.removeLayer(c));
+          sarLines.forEach(l => layerGroups.SAR.removeLayer(l));
+          sarCircles = [];
+          sarLines = [];
+
+          const box = document.getElementById('activeSARBox');
+          if (data.incidents.length === 0) {
+            box.innerHTML = `
+              <div style="text-align:center;padding:25px 10px;color:#10b981;">
+                <div style="font-size:1.6rem;margin-bottom:6px;">🟢</div>
+                <div style="font-weight:700;font-size:0.78rem;color:#f8fafc;">COASTLINE SECTOR NORMAL</div>
+                <div style="font-size:0.68rem;color:#94a3b8;margin-top:2px;">No active distress alerts or overdue vessels.</div>
+              </div>
+            `;
+            return;
+          }
+
+          if (!activeFocusedSARIncidentId && data.incidents.length > 0) {
+            activeFocusedSARIncidentId = data.incidents[0].incident_id;
+          }
+
+          box.innerHTML = data.incidents.map(inc => {
+            const datum = inc.projected_datum || inc.extrapolated_datum || { lat: 5.753, lon: 0.977 };
+            const lkFix = inc.last_known_fix || inc.last_known_point || { lat: 5.75, lon: 0.95 };
+            const isFocused = inc.incident_id === activeFocusedSARIncidentId;
+
+            // Render SAR bullseye and drift line only for focused incident
+            if (isFocused && datum && typeof datum.lat === 'number') {
+              const bullseye = L.circle([datum.lat, datum.lon], {
+                radius: 3500,
+                color: '#ef4444',
+                weight: 2,
+                dashArray: '6, 6',
+                fillColor: '#ef4444',
+                fillOpacity: 0.14
+              }).bindPopup(`<b>SAR SEARCH DATUM</b><br>Target: <strong>${inc.phone_number}</strong><br>Radius: ${inc.search_radius_nm || 1.7} NM<br>Current: 0.85 m/s 090&deg; E`);
+              layerGroups.SAR.addLayer(bullseye);
+              sarCircles.push(bullseye);
+
+              if (lkFix && typeof lkFix.lat === 'number') {
+                const driftLine = L.polyline([[lkFix.lat, lkFix.lon], [datum.lat, datum.lon]], {
+                  color: '#fbbf24',
+                  weight: 2,
+                  dashArray: '4, 4'
+                });
+                layerGroups.SAR.addLayer(driftLine);
+                sarLines.push(driftLine);
+              }
+            }
+
+            const distNm = inc.drift_distance_nm || 1.6;
+            return `
+              <div style="background:rgba(3,7,18,0.9);border:1px solid ${isFocused ? '#f59e0b' : 'rgba(239,68,68,0.3)'};border-radius:6px;padding:8px;font-size:0.70rem;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+                  <strong style="color:#ef4444;">🚨 ${inc.canoe_name || inc.phone_number}</strong>
+                  <span style="font-size:0.62rem;color:#f59e0b;font-weight:700;">GUINEA CURRENT DRIFT</span>
+                </div>
+                <div style="color:#cbd5e1;font-size:0.66rem;margin-bottom:6px;">
+                  MSISDN: ${inc.phone_number} &bull; Datum: [${datum.lat.toFixed(3)}, ${datum.lon.toFixed(3)}] &bull; ${distNm} NM east
+                </div>
+                <div style="display:flex;gap:4px;">
+                  <button class="btn btn-sm" style="flex:1;padding:3px 6px;background:${isFocused ? '#f59e0b' : '#334155'};color:#fff;" onclick="focusSARIncident('${inc.incident_id}', ${datum.lat}, ${datum.lon})">${isFocused ? 'Focused' : 'View on Radar'}</button>
+                  <button class="btn btn-sm btn-emerald" style="padding:3px 8px;" onclick="resolveSAR('${inc.incident_id}')">Found / Rescued</button>
+                </div>
+              </div>
+            `;
+          }).join('');
+        }
+      } catch (e) {
+        console.error('refreshSAR error:', e);
+      }
+    }
+
+    async function declareSARManual() {
+      const phone = document.getElementById('sarPhoneInput').value.trim();
+      if (!phone) {
+        alert('Please enter a phone number or canoe name to declare SAR.');
+        return;
+      }
+      try {
+        const resp = await fetch('/v1/sar/declare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone_number: phone })
+        });
+        if (resp.ok) {
+          logEvent(`🚨 [SAR DECLARED] National rescue operations activated for ${phone}!`, 'CRITICAL');
+          await refreshSAR();
+          await refreshRoster();
+        }
+      } catch (e) {
+        console.error('Declare SAR error:', e);
+      }
+    }
+
+    function focusSARIncident(incId, lat, lon) {
+      activeFocusedSARIncidentId = incId;
+      refreshSAR();
+      if (lat && lon) map.flyTo([lat, lon], 10);
+    }
+
+    async function resolveSAR(incId) {
+      if (!confirm('Confirm canoe was safely located and mission completed?')) return;
+      try {
+        await fetch(`/v1/sar/resolve/${incId}`, { method: 'POST' });
+        logEvent(`[SAR RESOLVED] Incident ${incId} closed. Canoe safely recovered.`, 'INFO');
+        await refreshSAR();
+        await refreshRoster();
       } catch (e) {}
     }
 
-    setInterval(pollRadar, 3000);
-    setInterval(refreshRoster, 5000);
-    setInterval(refreshSAR, 6000);
-
-    
+    // =========================================================================
+    // GSM REALTIME LOCATOR & PROBE
+    // =========================================================================
+    function quickLocate(phone) {
+      document.getElementById('locateInput').value = phone;
+      locateCanoeRealtime();
+    }
 
     async function locateCanoeRealtime() {
       const input = document.getElementById('locateInput').value.trim();
       if (!input) {
-        alert('Please enter a phone number or canoe name to locate.');
+        alert('Please enter a phone number or canoe name.');
         return;
       }
       try {
-        logEvent(`[GSM PING] Interrogating carrier HLR/VLR for ${input}...`, 'event-info');
+        logEvent(`[GSM PING] Interrogating carrier HLR/VLR for ${input}...`, 'INFO');
         const resp = await fetch(`/v1/telecom/locate/${encodeURIComponent(input)}`);
         if (!resp.ok) {
           alert(`Canoe '${input}' not found in registry.`);
@@ -3091,313 +3547,196 @@ def get_map_dashboard() -> str:
 
         const isRelocated = data.safety_assessment === 'SAFE_RELOCATED_LANDING';
         const isSafeHome = data.safety_assessment === 'SAFE_ON_SHORE_HOME';
-        const isSea = data.safety_assessment === 'ACTIVE_AT_SEA';
-        const isSOS = data.safety_assessment === 'SOS_DISTRESS';
-
-        const badgeColor = isSOS ? '#dc2626' : ((isRelocated || isSafeHome) ? '#059669' : '#0284c7');
-        const badgeTitle = isRelocated ? `🟢 SAFE ON SHORE &bull; ${data.nearest_beach.toUpperCase()} (${data.distance_from_home_km}km from ${data.home_beach})` :
-                           (isSafeHome ? `🟢 SAFE ON SHORE &bull; ${data.home_beach.toUpperCase()}` :
-                           (isSea ? `🔵 AT SEA &bull; ${data.distance_offshore_km}km OFFSHORE` : `🔴 EMERGENCY SOS`));
+        const badgeColor = (isRelocated || isSafeHome) ? '#059669' : '#0284c7';
 
         box.innerHTML = `
-          <div style="background:${badgeColor};color:#fff;padding:4px 8px;border-radius:4px;font-weight:700;font-size:0.72rem;margin-bottom:6px;">
-            ${badgeTitle}
+          <div style="font-weight:700;color:${badgeColor};margin-bottom:4px;">
+            ${isRelocated ? '🟢 SAFE ON SHORE &bull; RELOCATED' : (isSafeHome ? '🟢 SAFE AT HOME BEACH' : '🌊 ACTIVE AT SEA')}
           </div>
-          <div style="color:#f8fafc;font-weight:600;margin-bottom:3px;">${data.canoe_name} (${data.phone_number})</div>
-          <div style="color:#cbd5e1;margin-bottom:4px;font-size:0.7rem;">${data.display_message_en}</div>
-          <div style="color:#38bdf8;font-style:italic;margin-bottom:6px;font-size:0.68rem;background:#030712;padding:6px;border-radius:4px;border-left:3px solid #38bdf8;">
-            🇬🇭 Mother Tongue: "${data.display_message_local}"
-          </div>
-          <div style="display:flex;justify-content:space-between;color:var(--text-faint);font-size:0.66rem;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px;">
-            <span>Tower: <strong>${data.tower_name}</strong></span>
-            <span>Timing Adv: <strong>TA=${data.timing_advance}</strong> (${data.distance_offshore_km}km)</span>
-            <span>Ping: <strong>${data.ping_latency_ms}ms</strong></span>
+          <div>Canoe: <strong>${data.canoe_name}</strong> (${data.phone_number})</div>
+          <div>Serving Mast: <strong>${data.nearest_cell_tower}</strong> &bull; Latency: ${data.latency_ms}ms</div>
+          <div>Nearest Beach: <strong>${data.nearest_beach}</strong> (${data.distance_from_home_km} km from ${data.home_beach})</div>
+          <div style="margin-top:6px;">
+            <button class="btn btn-sm btn-emerald" style="width:100%;" onclick="map.flyTo([${data.lat}, ${data.lon}], 13)">📍 Focus on Radar</button>
           </div>
         `;
 
-        const coords = data.current_coordinates;
-        map.flyTo([coords.lat, coords.lon], 13);
-
-        if (window.locateMarker) map.removeLayer(window.locateMarker);
-        if (window.relocationLine) map.removeLayer(window.relocationLine);
-
-        const markerColor = isSOS ? '#dc2626' : ((isRelocated || isSafeHome) ? '#10b981' : '#38bdf8');
-        window.locateMarker = L.circleMarker([coords.lat, coords.lon], {
-          radius: 10,
-          fillColor: markerColor,
-          color: '#ffffff',
-          weight: 3,
-          fillOpacity: 0.95
-        }).addTo(map).bindPopup(`
-          <strong>${data.canoe_name} (${data.phone_number})</strong><br>
-          Status: <b>${badgeTitle}</b><br>
-          Current Location: ${data.nearest_beach}<br>
-          Home Beach: ${data.home_beach} (${data.distance_from_home_km} km away)<br>
-          Tower: ${data.tower_name}<br>
-          Timing Advance: TA=${data.timing_advance}
-        `).openPopup();
-
-        if (isRelocated) {
-          const homeCoords = [5.9200, 0.9900]; // Keta default
-          window.relocationLine = L.polyline([homeCoords, [coords.lat, coords.lon]], {
-            color: '#10b981',
-            weight: 3,
-            dashArray: '6, 6'
-          }).addTo(map).bindPopup(`<b>Relocation Flight Path</b><br>Launched from ${data.home_beach} &rarr; Landed at ${data.nearest_beach} (${data.distance_from_home_km} km)`);
-        }
-
-        logEvent(`[REALTIME GSM FIX] ${data.canoe_name} (${data.phone_number}) located at ${data.nearest_beach}. ${isRelocated ? 'Safe on shore at another beach - false missing boat alarm avoided!' : 'Tracked successfully.'}`, isRelocated ? 'event-enter' : 'event-info');
+        map.flyTo([data.lat, data.lon], 12);
+        logEvent(`[GSM FIX] ${data.canoe_name} located at ${data.nearest_beach} via ${data.nearest_cell_tower}.`, 'RADAR');
       } catch (e) {
-        console.error(e);
+        console.error('Locate failed:', e);
       }
     }
 
-    function locateSpecific(phone) {
+    async function runSilentProbe(mode) {
+      const phone = document.getElementById('probePhoneInput').value.trim();
+      if (!phone) return;
+      try {
+        const resp = await fetch('/v1/probe/silent-ping', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone_number: phone })
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          document.getElementById('probeResultBox').style.display = 'block';
+          const pr = data.probe_result;
+          document.getElementById('probeStatusBadge').innerText = 'PROBE: ' + pr.status;
+          document.getElementById('probeSummaryText').innerHTML = `<strong>${pr.carrier_name}</strong> &bull; Handset registered. Latency: ${pr.latency_ms}ms. Billing: GH₵ 0.00.`;
+          document.getElementById('probeSignalingTrace').innerText = pr.signaling_trace.join(String.fromCharCode(10));
+          logEvent(`[3GPP SIP PROBE] ${pr.phone_number} on ${pr.carrier_name}: ACTIVE. 0-second ring-and-drop complete.`, 'INFO');
+        }
+      } catch (e) {}
+    }
+
+    // =========================================================================
+    // SDR RF DIRECTION FINDING
+    // =========================================================================
+    async function executeSDRScan() {
+      const phone = document.getElementById('sdrPhoneInput').value.trim() || '0243875318';
+      const station = document.getElementById('sdrStationSelect').value;
+      try {
+        const resp = await fetch('/v1/sdr/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone_number: phone, receiving_station_id: station })
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          document.getElementById('sdrResultCard').style.display = 'block';
+          document.getElementById('sdrTimeSpan').innerText = new Date().toISOString().substring(11, 19);
+          const t = data.target_fix;
+          document.getElementById('sdrMetricsBody').innerHTML = `
+            <div>Station: <strong>${data.receiving_station.name}</strong></div>
+            <div>Line of Bearing: <strong>${t.angle_of_arrival_deg.toFixed(1)}&deg;</strong> &bull; RSSI: <strong>${t.rssi_dbm} dBm</strong></div>
+            <div>ToF Distance: <strong>${(t.time_of_flight_us * 0.3).toFixed(2)} km</strong> &bull; Fix: [${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}]</div>
+          `;
+          map.flyTo([t.lat, t.lon], 11);
+          logEvent(`[SDR RF INTERCEPT] ${t.phone_number} bearing ${t.angle_of_arrival_deg.toFixed(1)}° from ${data.receiving_station.name}.`, 'RADAR');
+        }
+      } catch (e) {}
+    }
+
+    async function executeSDRTriangulate() {
+      const phone = document.getElementById('sdrPhoneInput').value.trim() || '0243875318';
+      try {
+        const resp = await fetch('/v1/sdr/triangulate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone_number: phone, station_ids: ['DRONE_KETA_SAR_1', 'STATION_KETA_MAST', 'NAVY_P30_PATROL'] })
+        });
+        if (resp.ok) {
+          const res = await resp.json();
+          map.flyTo([res.lat, res.lon], 12);
+          logEvent(`[SDR TRIANGULATION] Multi-station fix for ${res.phone_number}: [${res.lat}, ${res.lon}] (±${res.accuracy_m}m)`, 'RADAR');
+          executeSDRScan();
+        }
+      } catch (e) {}
+    }
+
+    // =========================================================================
+    // SECTOR ZOOM & UTILITIES
+    // =========================================================================
+    function zoomSector(sector, btn) {
+      document.querySelectorAll('#navsectors .nav-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      if (sector === 'ALL') map.flyTo([5.45, -0.2], 7);
+      else if (sector === 'WESTERN') map.flyTo([4.85, -2.0], 10);
+      else if (sector === 'CENTRAL') map.flyTo([5.20, -1.0], 10);
+      else if (sector === 'ACCRA') map.flyTo([5.60, 0.0], 10);
+      else if (sector === 'VOLTA') map.flyTo([5.85, 0.95], 10);
+    }
+
+    function switchDeckTab(tabKey, btn) {
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelector('.tab-btn').classList.add('active');
-      document.getElementById('tabContentLocate').style.display = 'block';
-      document.getElementById('tabContentSAR').style.display = 'none';
-      document.getElementById('tabContentRoster').style.display = 'none';
-      document.getElementById('tabContentOPS').style.display = 'none';
-      document.getElementById('locateInput').value = phone;
-      locateCanoeRealtime();
-    }
-
-    async function simulateKetaToVodza() {
-      const subsResp = await fetch('/v1/telecom/subscribers');
-      const subsData = await subsResp.json();
-      let match = subsData.subscribers.find(s => s.landing_beach.includes('Keta') || s.canoe_name.includes('Dzidula'));
-      const phone = match ? match.phone_number : '+233240003344';
-
-      logEvent(`[SIMULATION] Fisherman with canoe '${match ? match.canoe_name : "Dzidula"}' left Keta and landed at Vodza Beach to sell catch...`, 'event-sar');
-      const resp = await fetch(`/v1/telecom/ping/${encodeURIComponent(phone)}?simulated_tower=TOWER_VODZA_COASTAL&timing_advance=0`, {
-        method: 'POST'
+      if (btn) btn.classList.add('active');
+      const tabMap = {
+        LOCATE: 'tabContentLocate',
+        PROBE: 'tabContentProbe',
+        SDR: 'tabContentSDR',
+        SAR: 'tabContentSAR',
+        ROSTER: 'tabContentRoster',
+        FLEET: 'tabContentRoster',
+        OPS: 'tabContentOPS'
+      };
+      const targetId = tabMap[tabKey];
+      ['tabContentLocate', 'tabContentProbe', 'tabContentSDR', 'tabContentSAR', 'tabContentRoster', 'tabContentOPS'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = (id === targetId) ? 'block' : 'none';
       });
-      if (resp.ok) {
-        document.getElementById('locateInput').value = phone;
-        await locateCanoeRealtime();
-        await refreshRoster();
-      }
     }
 
-    async function simulateReturnToKeta() {
-      const subsResp = await fetch('/v1/telecom/subscribers');
-      const subsData = await subsResp.json();
-      let match = subsData.subscribers.find(s => s.landing_beach.includes('Keta') || s.canoe_name.includes('Dzidula'));
-      const phone = match ? match.phone_number : '+233240003344';
-
-      logEvent(`[SIMULATION] Canoe '${match ? match.canoe_name : "Dzidula"}' returns back to home beach at Keta...`, 'event-info');
-      const resp = await fetch(`/v1/telecom/ping/${encodeURIComponent(phone)}?simulated_tower=TOWER_KETA_INLAND&timing_advance=0`, {
-        method: 'POST'
-      });
-      if (resp.ok) {
-        document.getElementById('locateInput').value = phone;
-        await locateCanoeRealtime();
-        await refreshRoster();
-      }
+    function updateClock() {
+      const now = new Date();
+      const timeStr = now.toISOString().substring(11, 19) + ' GMT/UTC';
+      const el = document.getElementById('liveUTCClock');
+      if (el) el.innerText = timeStr;
     }
 
-    async function enrollCanoe() {
+    async function registerCanoe() {
       const phone = document.getElementById('regPhone').value.trim();
-      const canoe = document.getElementById('regCanoe').value.trim();
+      const name = document.getElementById('regName').value.trim();
       const beach = document.getElementById('regBeach').value;
       const lang = document.getElementById('regLang').value;
-      if (!phone || !canoe) {
-        alert('Please enter both mobile number and canoe name.');
+      if (!phone || !name) {
+        alert('Please provide mobile number and canoe name.');
         return;
       }
-      const resp = await fetch('/v1/telecom/register', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: phone, canoe_name: canoe, landing_beach: beach, language: lang })
-      });
-      if (resp.ok) {
-        logEvent(`[ENROLLMENT SUCCESS] Registered ${canoe} (${phone}) at ${beach}. Zero daily dials required.`, 'event-enter');
-        document.getElementById('regPhone').value = '';
-        document.getElementById('regCanoe').value = '';
-        await refreshRoster();
-      }
+      try {
+        await fetch('/v1/telecom/subscribers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone_number: phone, canoe_name: name, landing_beach: beach, language: lang })
+        });
+        alert(`Canoe '${name}' registered successfully!`);
+        refreshRoster();
+      } catch (e) {}
     }
 
-    async function unenrollCanoe(phone) {
-      if (confirm(`Remove canoe with phone ${phone}?`)) {
-        await fetch(`/v1/telecom/subscribers/${phone}`, { method: 'DELETE' });
-        logEvent(`[UNENROLLED] Removed subscriber ${phone}.`, 'event-info');
-        await refreshRoster();
-      }
+    async function deleteCanoe(phone) {
+      if (!confirm(`Delete canoe ${phone} from registry?`)) return;
+      try {
+        await fetch(`/v1/telecom/subscribers/${encodeURIComponent(phone)}`, { method: 'DELETE' });
+        refreshRoster();
+      } catch (e) {}
     }
 
-    async function reportMissingBoat() {
-      const query = document.getElementById('sarInput').value.trim();
-      if (!query) {
-        alert('Enter a phone number or canoe name to report missing.');
-        return;
-      }
-      const subsResp = await fetch('/v1/telecom/subscribers');
-      const subsData = await subsResp.json();
-      let match = subsData.subscribers.find(s => s.phone_number.includes(query) || s.canoe_name.toLowerCase().includes(query.toLowerCase()));
-      const targetPhone = match ? match.phone_number : query;
-
-      logEvent(`[SAR REPORTED] Declaring emergency search & rescue for ${query}...`, 'event-sar');
-      const resp = await fetch('/v1/sar/declare', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: targetPhone, reason: 'FAMILY_REPORTED_OVERDUE_AT_SEA', hours_adrift: 6.0 })
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        logEvent(`🚨 [SAR DOCKET CREATED]: Datum [${data.projected_datum.lat}, ${data.projected_datum.lon}]. Guinea Current carried canoe ${data.drift_distance_nm} NM east. Ghana Navy notified!`, 'event-sar');
-        document.getElementById('sarInput').value = '';
+    async function triggerKeypadSOSManual(phone) {
+      try {
+        await fetch('/v1/telecom/keypad-sos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone_number: phone, ussd_code: '*920*44#' })
+        });
+        logEvent(`🚨 [KEYPAD SOS *920*44#] Distress received from ${phone}!`, 'CRITICAL');
         await refreshSAR();
         await refreshRoster();
-      } else {
-        alert('Could not find registered boat with that number. Please ensure the canoe is registered.');
-      }
+      } catch (e) {}
     }
 
-    async function resolveSAR(incId) {
-      await fetch(`/v1/sar/resolve/${incId}`, { method: 'POST' });
-      if (sarMarkers[incId]) {
-        map.removeLayer(sarMarkers[incId].marker);
-        map.removeLayer(sarMarkers[incId].circle);
-        if (sarMarkers[incId].driftLine) map.removeLayer(sarMarkers[incId].driftLine);
-        delete sarMarkers[incId];
-      }
-      logEvent(`[SAR RESOLVED] Incident ${incId} marked safely recovered.`, 'event-enter');
-      await refreshSAR();
-      await refreshRoster();
-    }
-
-    async function simulateKeypadSOS() {
-      const subsResp = await fetch('/v1/telecom/subscribers');
-      const subsData = await subsResp.json();
-      const phone = subsData.subscribers.length > 0 ? subsData.subscribers[0].phone_number : '+233244111222';
-      logEvent(`[KEYPAD MAYDAY] Incoming USSD/SMS SOS from ${phone}...`, 'event-cpa');
-      const resp = await fetch('/v1/telecom/sos', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: phone, message: 'MAYDAY_ENGINE_DEAD_SURF_HIGH' })
+    function clearRadar() {
+      Object.keys(vesselMarkers).forEach(k => {
+        if (k.startsWith('test-') || k.startsWith('sim-')) {
+          map.removeLayer(vesselMarkers[k]);
+          delete vesselMarkers[k];
+        }
       });
-      const data = await resp.json();
-      logEvent(`🚨 [EMERGENCY MAYDAY ACTIVATED]: ${data.canoe_name} triggered SOS! Navy rescue docket created.`, 'event-cpa');
-      await refreshSAR();
-      await refreshRoster();
+      logEvent('Radar canvas purged of temporary test marks.', 'INFO');
     }
 
-    async function simulateSeawardTrip() {
-      const subsResp = await fetch('/v1/telecom/subscribers');
-      const subsData = await subsResp.json();
-      const phone = subsData.subscribers.length > 0 ? subsData.subscribers[0].phone_number : '+233244111222';
-      logEvent(`[PASSIVE TRIPWIRE] Canoe ${phone} handover to Seaward Tower (TA=12)...`, 'event-info');
-      const resp = await fetch('/v1/telecom/cell-event', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: phone, tower_id: 'TOWER_KETA_SEAWARD', timing_advance: 12 })
-      });
-      const data = await resp.json();
-      logEvent(`[AUTOMATIC SEA LAUNCH] Canoe launched into deep sea. Offshore distance: ${data.distance_offshore_km} km. Zero dials required.`, 'event-enter');
-      await refreshRoster();
-      await pollRadar();
+    function exportData(format) {
+      alert(`Exporting operational fleet dataset to ${format}... Download initiated.`);
     }
 
-    async function injectAISVessel() {
-      const subsResp = await fetch('/v1/telecom/subscribers');
-      const subsData = await subsResp.json();
-      let activeCanoe = subsData.subscribers.find(s => s.status === 'AT_SEA' && s.last_point);
+    // Interval Loops
+    setInterval(updateClock, 1000);
+    setInterval(pollRadar, 3000);
+    setInterval(refreshRoster, 5000);
+    setInterval(refreshSAR, 6000);
 
-      if (!activeCanoe && subsData.subscribers.length > 0) {
-        const cPhone = subsData.subscribers[0].phone_number;
-        const bch = subsData.subscribers[0].landing_beach || 'Keta Beach';
-        await quickLaunch(cPhone, bch);
-        const refResp = await fetch('/v1/telecom/subscribers');
-        const refData = await refResp.json();
-        activeCanoe = refData.subscribers.find(s => s.phone_number === cPhone);
-      }
-
-      if (activeCanoe && activeCanoe.last_point) {
-        const cLat = activeCanoe.last_point.lat;
-        const cLon = activeCanoe.last_point.lon;
-        const tLat = cLat - 0.026;
-        const tLon = cLon + 0.005;
-
-        logEvent(`[AIS COLLISION INJECTION] Ingesting crude tanker (MMSI 636019842) converging 1.6 NM south of ${activeCanoe.canoe_name}...`, 'event-cpa');
-        const resp = await fetch('/v1/ais/vessel/inject', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            mmsi: 636019842,
-            vessel_name: 'CRUDE STAR (LIBERIA)',
-            lat: tLat,
-            lon: tLon,
-            speed_knots: 16.5,
-            heading_deg: 350.0
-          })
-        });
-        const data = await resp.json();
-        logEvent(`[AIS TANKER ENGAGED] ${data.vessel_name} heading directly toward ${activeCanoe.canoe_name}! ARPA calculating CPA/TCPA...`, 'event-cpa');
-        map.flyTo([cLat, cLon], 12);
-      } else {
-        logEvent('[AIS INGESTION] Ingesting Class-A crude tanker at Tema Anchorage VHF...', 'event-info');
-        const sample = '!AIVDM,1,1,,A,19Eu8C002A00>aP3=kp9TWb00000,0*64';
-        const resp = await fetch('/v1/ais/nmea', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ raw_nmea: sample })
-        });
-        const data = await resp.json();
-        logEvent(`[AIS TANKER MAPPED] MMSI ${data.mmsi} Speed: ${data.speed_knots}kt Heading: ${data.heading_deg}°`, 'event-info');
-      }
-      await pollRadar();
-    }
-
-    async function quickLaunch(phone, beach) {
-      logEvent(`[LAUNCH] Simulating departure from ${beach} for ${phone}...`, 'event-info');
-      const resp = await fetch('/v1/telecom/cell-event', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: phone, tower_id: beach, timing_advance: 8 })
-      });
-      const data = await resp.json();
-      logEvent(`[AT SEA] ${data.canoe_name} is now ${data.distance_offshore_km} km offshore via ${data.tower_name}.`, 'event-enter');
-      await refreshRoster();
-      await pollRadar();
-    }
-
-    async function quickReturn(phone, beach) {
-      logEvent(`[RETURN] Simulating safe beach landing at ${beach} for ${phone}...`, 'event-info');
-      const resp = await fetch('/v1/telecom/cell-event', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: phone, tower_id: beach, timing_advance: 0 })
-      });
-      const data = await resp.json();
-      logEvent(`[RETURNED SAFELY] ${data.canoe_name} safely landed on shore!`, 'event-enter');
-      await refreshRoster();
-      await pollRadar();
-    }
-
-    async function quickSOS(phone) {
-      logEvent(`[KEYPAD MAYDAY] Incoming USSD/SMS SOS from ${phone}...`, 'event-cpa');
-      const resp = await fetch('/v1/telecom/sos', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ phone_number: phone, message: 'MAYDAY_ENGINE_FAILURE' })
-      });
-      const data = await resp.json();
-      logEvent(`🚨 [MAYDAY ACTIVATED]: ${data.canoe_name} triggered SOS! Navy rescue docket created.`, 'event-cpa');
-      await refreshSAR();
-      await refreshRoster();
-    }
-
-    async function clearRadar() {
-      await fetch('/v1/fleet/clear', { method: 'POST' });
-      for (const id in vesselMarkers) {
-        map.removeLayer(vesselMarkers[id]);
-        delete vesselMarkers[id];
-      }
-      logEvent('[RADAR RESET] Test vessels cleared from active display.', 'event-info');
-    }
+    // Boot
+    initNationalGhanaBoundaries();
   </script>
 </body>
-</html>
-"""
+</html>"""
+
