@@ -48,9 +48,21 @@ durable_store = DurableStore()
 telecom_gateway = TelecomPassiveGateway(store=durable_store)
 sar_watchdog = SARWatchdog(durable_store)
 ais_decoder = AISDecoder()
+from geomesh.live_ais import LiveAISStreamClient
+live_ais_client = LiveAISStreamClient(engine=_engine)
 
 _telemetry_pings_total = 0
 _geofence_breaches_total = 0
+
+
+@app.on_event("startup")
+async def startup_event():
+    live_ais_client.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    live_ais_client.stop()
 
 # Clean state backed by SQLite WAL database - no hardcoded mock fishermen
 
@@ -367,8 +379,14 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
             if sub:
                 status_str = sub.status.value if hasattr(sub.status, "value") else str(sub.status)
 
+        meta = live_ais_client.get_vessel_metadata(ent_id)
+        ship_name = meta["ship_name"] if meta else (ent_id if not ent_id.startswith("canoe-") else None)
+        is_live = meta is not None
+
         vehicles.append({
             "entity_id": ent_id,
+            "ship_name": ship_name,
+            "is_live": is_live,
             "position": {"lat": pos.lat, "lon": pos.lon},
             "kinematics": {
                 "velocity_mps": k_state.velocity_mps if k_state else 0.0,
@@ -393,6 +411,9 @@ def snapshot_fleet(request: Request) -> Dict[str, Any]:
         "snapshot_id": snapshot_id,
         "timestamp_ns": time.time_ns(),
         "total_tracked_vehicles": len(vehicles),
+        "live_ais_status": live_ais_client.status,
+        "live_ais_messages": live_ais_client.total_messages_received,
+        "live_vessels_count": live_ais_client.total_vessels_tracked,
         "vehicles": vehicles,
         "collision_hazards": hazards,
         "status": "FLEET_SNAPSHOT_COMMITTED",
@@ -770,6 +791,34 @@ def ingest_ais_nmea(req: AISNMEARequest) -> Dict[str, Any]:
             "destination": report.destination,
         }
     return {"decoded": False}
+
+
+@app.get("/v1/ais/live/status", tags=["AIS Commercial Ship Telemetry"])
+def get_live_ais_status() -> Dict[str, Any]:
+    """Get status and live statistics from AISStream.io real-time satellite & coastal feed."""
+    return {
+        "status": live_ais_client.status,
+        "api_key_configured": bool(live_ais_client.api_key),
+        "total_messages_received": live_ais_client.total_messages_received,
+        "total_vessels_tracked": live_ais_client.total_vessels_tracked,
+        "last_connected_time": live_ais_client.last_connected_time,
+        "last_message_time": live_ais_client.last_message_time,
+        "tracked_vessels": list(live_ais_client._vessel_metadata.values()),
+    }
+
+
+@app.post("/v1/ais/live/start", tags=["AIS Commercial Ship Telemetry"])
+def start_live_ais() -> Dict[str, Any]:
+    """Start live background AIS stream from AISStream.io."""
+    live_ais_client.start()
+    return {"started": True, "status": live_ais_client.status}
+
+
+@app.post("/v1/ais/live/stop", tags=["AIS Commercial Ship Telemetry"])
+def stop_live_ais() -> Dict[str, Any]:
+    """Stop live background AIS stream from AISStream.io."""
+    live_ais_client.stop()
+    return {"stopped": True, "status": live_ais_client.status}
 
 
 @app.post("/v1/ais/vessel/inject", tags=["AIS Commercial Ship Telemetry"])
@@ -1410,6 +1459,10 @@ def get_map_dashboard() -> str:
         <span style="color:var(--text-faint);">BTS MESH:</span>
         <span class="telemetry-val" style="color:var(--accent-emerald);">29 Towers Active</span>
       </div>
+      <div class="telemetry-item">
+        <span style="color:var(--text-faint);">LIVE AIS:</span>
+        <span id="liveAISBadge" class="telemetry-val" style="color:#10b981;">CONNECTING...</span>
+      </div>
     </div>
 
     <!-- Fleet Status Metrics Badges -->
@@ -1417,6 +1470,7 @@ def get_map_dashboard() -> str:
       <div class="stat-badge">ENROLLED: <span id="statEnrolled" class="stat-val">0</span></div>
       <div class="stat-badge">AT SEA: <span id="statAtSea" class="stat-val" style="color:#38bdf8;">0</span></div>
       <div class="stat-badge">ON SHORE: <span id="statOnShore" class="stat-val" style="color:#10b981;">0</span></div>
+      <div class="stat-badge" style="border-color:rgba(245,158,11,0.3);">LIVE SHIPS: <span id="statShips" class="stat-val" style="color:#f59e0b;">0</span></div>
       <div class="stat-badge" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);">
         🚨 OVERDUE / SOS: <span id="statSOS" class="stat-sos">0</span>
       </div>
@@ -1602,6 +1656,7 @@ def get_map_dashboard() -> str:
 
     // High-Contrast CartoDB Dark Matter Maritime Basemap
     const map = L.map('map', { zoomControl: false }).setView([5.30, -0.85], 8);
+    window.leafletMap = map;
     L.control.zoom({ position: 'topright' }).addTo(map);
 
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
@@ -1834,21 +1889,24 @@ def get_map_dashboard() -> str:
           snap.vehicles.forEach(v => {
             const isCanoe = v.entity_id.startsWith('canoe-');
             const pt = [v.position.lat, v.position.lon];
+            const titleName = v.ship_name || (isCanoe ? "ARTISANAL CANOE" : "COMMERCIAL VESSEL");
+            let popupHtml = "<b>" + (isCanoe ? "⛴ ARTISANAL CANOE" : "🚢 " + titleName) + "</b><br>" +
+              "ID: <b>" + v.entity_id + "</b><br>" +
+              "Speed: " + (v.speed_mps * 1.94384).toFixed(1) + " knots<br>" +
+              "Heading: " + v.heading_deg.toFixed(0) + "&deg;<br>" +
+              "Position: [" + v.position.lat.toFixed(4) + ", " + v.position.lon.toFixed(4) + "]<br>";
+            if (v.is_live) {
+              popupHtml += '<span style="color:#10b981;font-weight:700;">🟢 LIVE SATELLITE/VHF AIS</span>';
+            }
             if (vesselMarkers[v.entity_id]) {
               vesselMarkers[v.entity_id].setLatLng(pt);
               vesselMarkers[v.entity_id].setIcon(createVesselIcon(isCanoe, v.status, v.heading_deg));
+              vesselMarkers[v.entity_id].setPopupContent(popupHtml);
             } else {
               const marker = L.marker(pt, {
                 icon: createVesselIcon(isCanoe, v.status, v.heading_deg)
               }).addTo(map);
-
-              marker.bindPopup(`
-                <b>${isCanoe ? '🛶 ARTISANAL CANOE' : '🚢 COMMERCIAL VESSEL'}</b><br>
-                ID: <b>${v.entity_id}</b><br>
-                Speed: ${(v.speed_mps * 1.94384).toFixed(1)} knots<br>
-                Heading: ${v.heading_deg.toFixed(0)}&deg;<br>
-                Position: [${v.position.lat.toFixed(4)}, ${v.position.lon.toFixed(4)}]
-              `);
+              marker.bindPopup(popupHtml);
               vesselMarkers[v.entity_id] = marker;
             }
           });
@@ -1874,6 +1932,14 @@ def get_map_dashboard() -> str:
           } else if (window.hazardLine) {
             map.removeLayer(window.hazardLine);
             window.hazardLine = null;
+          }
+
+          const shipsCount = snap.vehicles.filter(v => !v.entity_id.startsWith('canoe-')).length;
+          const shipBadge = document.getElementById('statShips');
+          if (shipBadge) shipBadge.innerText = shipsCount;
+          const aisBadge = document.getElementById('liveAISBadge');
+          if (aisBadge && snap.live_ais_status) {
+            aisBadge.innerText = snap.live_ais_status + ' (' + (snap.live_ais_messages || 0) + ' msgs)';
           }
         }
       } catch (e) {}
