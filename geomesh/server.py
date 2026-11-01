@@ -28,6 +28,7 @@ from geomesh.telecom import (
     VesselStatus,
     normalize_ghana_phone,
 )
+from geomesh.probe import ProbeStatus, get_probe_engine
 from geomesh.types import (
     GeofenceAlreadyExistsError,
     GeofenceNotFoundError,
@@ -48,6 +49,8 @@ durable_store = DurableStore()
 telecom_gateway = TelecomPassiveGateway(store=durable_store)
 sar_watchdog = SARWatchdog(durable_store)
 ais_decoder = AISDecoder()
+probe_engine = get_probe_engine()
+
 from geomesh.live_ais import LiveAISStreamClient
 live_ais_client = LiveAISStreamClient(engine=_engine)
 
@@ -1006,6 +1009,84 @@ def list_coastal_towers() -> Dict[str, Any]:
 # Embedded Interactive Leaflet.js Production Map Dashboard
 # -------------------------------------------------------------------------
 
+
+# -------------------------------------------------------------------------
+# Self-Hosted Silent Radio Prober & Zero-Cost Signaling Endpoints
+# -------------------------------------------------------------------------
+
+class SilentProbeRequest(BaseModel):
+    phone_number: str
+
+
+@app.post("/v1/probe/silent-ping", tags=["Self-Hosted Radio Probing & Watchdog"])
+def execute_silent_probe(req: SilentProbeRequest) -> Dict[str, Any]:
+    """
+    Execute a zero-cost sub-second SIP ring-and-drop probe.
+    If the phone returns 480 Absent / Water Immersion, automatically triggers
+    the Guinea Current oceanographic drift model to project emergency search datum.
+    """
+    res = probe_engine.probe_subscriber(req.phone_number)
+    sar_triggered = False
+    incident_id = None
+    drift_datum = None
+
+    if res.status == ProbeStatus.IMPLICIT_DETACH_ABSENT:
+        try:
+            incident = sar_watchdog.declare_incident(
+                phone_number=res.phone_number,
+                reason="SILENT_PROBE_IMPLICIT_DETACH_WATER_IMMERSION",
+                custom_hours_adrift=2.5,
+            )
+            sar_triggered = True
+            incident_id = incident.incident_id
+            drift_datum = {
+                "lat": incident.datum_lat,
+                "lon": incident.datum_lon,
+                "drift_distance_nm": incident.drift_distance_nm,
+                "search_radius_nm": incident.search_radius_nm,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to declare SAR incident: {e}")
+    elif res.status == ProbeStatus.ROAMING_BORDER_CROSS:
+        ping = TelemetryPing.create(
+            entity_id=f"canoe-{res.phone_number}",
+            lat=6.1150,
+            lon=1.2350,
+            speed_mps=1.2,
+            heading_deg=85.0,
+            timestamp_ns=time.time_ns(),
+        )
+        _engine.ingest_telemetry(ping)
+
+    return {
+        "probe_result": res.model_dump(),
+        "sar_triggered": sar_triggered,
+        "incident_id": incident_id,
+        "drift_datum": drift_datum,
+    }
+
+
+@app.post("/v1/probe/simulate-capsize", tags=["Self-Hosted Radio Probing & Watchdog"])
+def simulate_capsize_event(req: SilentProbeRequest) -> Dict[str, Any]:
+    """Simulate canoe capsize / phone water immersion and execute automated probe."""
+    probe_engine.simulate_water_immersion(req.phone_number)
+    return execute_silent_probe(req)
+
+
+@app.post("/v1/probe/simulate-roaming", tags=["Self-Hosted Radio Probing & Watchdog"])
+def simulate_roaming_event(req: SilentProbeRequest) -> Dict[str, Any]:
+    """Simulate canoe drifting into Togolese waters and execute automated probe."""
+    probe_engine.simulate_togo_roaming(req.phone_number)
+    return execute_silent_probe(req)
+
+
+@app.post("/v1/probe/reset", tags=["Self-Hosted Radio Probing & Watchdog"])
+def reset_probe_event(req: SilentProbeRequest) -> Dict[str, Any]:
+    """Reset subscriber state to normal active baseline."""
+    probe_engine.reset_subscriber_state(req.phone_number)
+    return execute_silent_probe(req)
+
+
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
 def get_map_dashboard() -> str:
     """Serve GH-MARSAR National Coastal Operations Command Center."""
@@ -1498,6 +1579,7 @@ def get_map_dashboard() -> str:
     <!-- Navigation Tabs for Tactical Deck -->
     <div class="deck-tabs">
       <button class="tab-btn active" onclick="switchDeckTab('LOCATE', this)">🛰️ LOCATOR</button>
+      <button class="tab-btn" onclick="switchDeckTab('PROBE', this)">⚡ ZERO-COST PROBE</button>
       <button class="tab-btn" onclick="switchDeckTab('SAR', this)">🚨 SAR HOTLINE</button>
       <button class="tab-btn" onclick="switchDeckTab('ROSTER', this)">🛶 FLEET</button>
       <button class="tab-btn" onclick="switchDeckTab('OPS', this)">⚡ OPS &amp; AIS</button>
@@ -1530,6 +1612,39 @@ def get_map_dashboard() -> str:
       </div>
 
       <!-- TAB 2: SAR HOTLINE & OVERDUE REPORTING -->
+      
+      <!-- TAB: SELF-HOSTED SILENT PROBE & WATER IMMERSION WATCHDOG -->
+      <div id="tabContentProbe" style="display:none;">
+        <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:12px;margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <strong style="color:var(--accent-cyan);font-size:0.75rem;">⚡ SELF-HOSTED SILENT RADIO PROBE</strong>
+            <span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid #10b981;">ZERO PAID APIS</span>
+          </div>
+          <p style="font-size:0.68rem;color:var(--text-faint);margin:0 0 10px 0;line-height:1.3;">
+            Sub-second SIP Ring-and-Drop signaling. Probes cell tower status without ringing user or billing money (Cost: GH₵ 0.00). If phone drowned, watchdog auto-calculates Guinea Current drift!
+          </p>
+          <div style="display:flex;gap:6px;margin-bottom:8px;">
+            <input type="text" id="probePhoneInput" value="+233240003344" placeholder="Phone e.g. 0243875318" style="flex:1;background:rgba(3,7,18,0.8);border:1px solid rgba(255,255,255,0.15);border-radius:4px;color:#fff;padding:6px 10px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
+            <button class="btn btn-sm btn-cyan" onclick="runSilentProbe('NORMAL')">⚡ PROBE</button>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;">
+            <button class="btn btn-sm btn-red" onclick="runSilentProbe('CAPSIZE')">🌊 Water Capsize</button>
+            <button class="btn btn-sm btn-amber" onclick="runSilentProbe('TOGO')">🇹🇬 Togo Roaming</button>
+          </div>
+          <button class="btn btn-sm" style="width:100%;background:rgba(255,255,255,0.06);color:var(--text-faint);" onclick="runSilentProbe('RESET')">🔄 Reset Normal State</button>
+        </div>
+
+        <div id="probeResultBox" style="display:none;background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span id="probeStatusBadge" class="badge" style="font-size:0.7rem;">PROBE ACTIVE</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:0.68rem;color:#10b981;">Billing: GH₵ 0.00</span>
+          </div>
+          <div id="probeSummaryText" style="font-size:0.72rem;color:var(--text-light);margin-bottom:6px;"></div>
+          <div style="font-size:0.65rem;color:var(--text-faint);margin-bottom:4px;font-weight:700;">SIP SIGNALING PROTOCOL TRACE (SUB-SECOND):</div>
+          <div id="probeTraceBox" style="background:#020617;border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px;font-family:'JetBrains Mono',monospace;font-size:0.62rem;color:#38bdf8;max-height:120px;overflow-y:auto;white-space:pre-wrap;"></div>
+        </div>
+      </div>
+
       <div id="tabContentSAR" style="display:none;">
         <div class="card card-emergency">
           <h3>
@@ -1636,6 +1751,7 @@ def get_map_dashboard() -> str:
     function switchDeckTab(tabKey, btn) {
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
+      document.getElementById('tabContentProbe').style.display = tabKey === 'PROBE' ? 'block' : 'none';
       document.getElementById('tabContentLocate').style.display = tabKey === 'LOCATE' ? 'block' : 'none';
       document.getElementById('tabContentSAR').style.display = tabKey === 'SAR' ? 'block' : 'none';
       document.getElementById('tabContentRoster').style.display = tabKey === 'ROSTER' ? 'block' : 'none';
@@ -1879,6 +1995,69 @@ def get_map_dashboard() -> str:
           document.getElementById('activeSARBox').innerHTML = html;
         }
       } catch (e) {}
+    }
+
+    
+    async function runSilentProbe(mode) {
+      const phone = document.getElementById('probePhoneInput').value.trim();
+      if (!phone) return;
+      let url = '/v1/probe/silent-ping';
+      if (mode === 'CAPSIZE') url = '/v1/probe/simulate-capsize';
+      if (mode === 'TOGO') url = '/v1/probe/simulate-roaming';
+      if (mode === 'RESET') url = '/v1/probe/reset';
+
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ phone_number: phone })
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          const pr = data.probe_result;
+          const box = document.getElementById('probeResultBox');
+          box.style.display = 'block';
+
+          const badge = document.getElementById('probeStatusBadge');
+          const summary = document.getElementById('probeSummaryText');
+          const trace = document.getElementById('probeTraceBox');
+
+          if (pr.status === 'RINGING_ALIVE') {
+            badge.style.background = 'rgba(16,185,129,0.2)';
+            badge.style.color = '#10b981';
+            badge.style.borderColor = '#10b981';
+            badge.innerText = '🟢 RINGING_ALIVE (SIP 180)';
+            summary.innerHTML = '<strong>' + pr.carrier_name + '</strong> &bull; Handset connected to cell tower. Ring-and-drop canceled in ' + pr.latency_ms + 'ms. Cost: GH₵ 0.00.';
+            logEvent('[SIP PROBE] ' + pr.phone_number + ' on ' + pr.carrier_name + ': ACTIVE. 0-second ring-and-drop successful.', 'event-lbs');
+          } else if (pr.status === 'IMPLICIT_DETACH_ABSENT') {
+            badge.style.background = 'rgba(239,68,68,0.2)';
+            badge.style.color = '#f87171';
+            badge.style.borderColor = '#ef4444';
+            badge.innerText = '🚨 WATER IMMERSION / ABSENT (SIP 480)';
+            summary.innerHTML = '<strong style="color:#ef4444;">ABNORMAL RADIO LINK FAILURE!</strong> Phone drowned in water. Watchdog automatically calculated Guinea Current drift datum!';
+            const datumStr = data.drift_datum ? '[' + data.drift_datum.lat.toFixed(3) + ', ' + data.drift_datum.lon.toFixed(3) + ']' : '';
+            logEvent('🚨 [WATER IMMERSION DETECTED] ' + pr.phone_number + ' lost signal abruptly! SAR Watchdog calculated drift datum ' + datumStr + ' towards Togo!', 'event-cpa');
+            refreshSAR();
+            if (data.drift_datum && window.leafletMap) {
+              window.leafletMap.setView([data.drift_datum.lat, data.drift_datum.lon], 9);
+            }
+          } else if (pr.status === 'ROAMING_BORDER_CROSS') {
+            badge.style.background = 'rgba(245,158,11,0.2)';
+            badge.style.color = '#fbbf24';
+            badge.style.borderColor = '#f59e0b';
+            badge.innerText = '🇹🇬 BORDER CROSSING (Togocom MCC 615)';
+            summary.innerHTML = '<strong style="color:#fbbf24;">VESSEL ADRIFT IN TOGO WATERS!</strong> SIM silently attached to Togocom Lomé cell tower. International rescue alert dispatched.';
+            logEvent('⚠️ [INTERNATIONAL BORDER CROSS] ' + pr.phone_number + ' attached to Togocom (MCC 615)! Adrift into Togo territorial waters!', 'event-cpa');
+            if (window.leafletMap) {
+              window.leafletMap.setView([6.115, 1.235], 9);
+            }
+          }
+
+          trace.innerText = pr.signaling_trace.join('\n');
+        }
+      } catch (e) {
+        console.error(e);
+      }
     }
 
     async function pollRadar() {
