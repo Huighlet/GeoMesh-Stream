@@ -46,6 +46,10 @@ def test_autonomous_visual_e2e_suite():
         test_phone = "0245557788"
         test_canoe = "Enyonam"
         
+        # Switch to Operations & Registration tab
+        page.click("button:has-text('⚡ OPS')")
+        time.sleep(0.5)
+
         page.fill("#regPhone", test_phone)
         page.fill("#regCanoe", test_canoe)
         page.select_option("#regBeach", "Keta Beach")
@@ -55,7 +59,9 @@ def test_autonomous_visual_e2e_suite():
         page.click("button:has-text('Register Canoe Once')")
         time.sleep(2.0)
 
-        # Verify canoe appears in the Fleet Roster
+        # Switch to Fleet Roster tab to verify entry
+        page.click("button:has-text('🛶 FLEET')")
+        time.sleep(1.0)
         roster_text = page.inner_text("#fleetTable")
         assert test_canoe in roster_text
 
@@ -66,7 +72,9 @@ def test_autonomous_visual_e2e_suite():
         # -------------------------------------------------------------
         # STEP 3: AIS Commercial Tanker Convergence & Robocall
         # -------------------------------------------------------------
-        # Inject an AIS tanker heading directly toward an offshore canoe
+        # Switch to Operations tab to inject tanker
+        page.click("button:has-text('⚡ OPS')")
+        time.sleep(0.5)
         page.click("button:has-text('Inject AIS Tanker (Tema VHF)')")
         time.sleep(3.0)
 
@@ -81,6 +89,9 @@ def test_autonomous_visual_e2e_suite():
         # -------------------------------------------------------------
         # STEP 4: Real-Time Relocation Resolution (Keta -> Vodza Beach)
         # -------------------------------------------------------------
+        # Switch to Locator tab
+        page.click("button:has-text('🛰️ LOCATOR')")
+        time.sleep(0.5)
         page.click("button:has-text('Relocate to Vodza (Sell Fish)')")
         time.sleep(3.0)
 
@@ -97,10 +108,15 @@ def test_autonomous_visual_e2e_suite():
         # -------------------------------------------------------------
         # STEP 5: Emergency Keypad SOS & Guinea Current SAR Datum
         # -------------------------------------------------------------
+        # Switch to Operations tab to trigger SOS
+        page.click("button:has-text('⚡ OPS')")
+        time.sleep(0.5)
         page.click("button:has-text('Trigger Keypad SOS')")
         time.sleep(2.0)
 
-        # Now declare SAR for this canoe to project drift
+        # Switch to SAR tab to declare emergency search
+        page.click("button:has-text('🚨 SAR HOTLINE')")
+        time.sleep(0.5)
         page.fill("#sarInput", test_canoe)
         page.click("button:has-text('DECLARE SAR')")
         time.sleep(3.0)
