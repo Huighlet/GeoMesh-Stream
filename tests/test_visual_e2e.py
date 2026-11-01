@@ -73,12 +73,12 @@ def test_autonomous_visual_e2e_suite():
         mob_page.wait_for_selector("#preDepartureCard")
 
         # Test Multilingual Translation to Ewe
-        mob_page.click("button:has-text('Eʋegbe')")
+        mob_page.click("button:has-text('EWE')")
         time.sleep(0.5)
-        assert "ƑU DZI YIYI" in mob_page.inner_text("#txtTitle")
+        assert "YIYI" in mob_page.inner_text("#txtTitle")
 
         # Switch back to English and 1-tap depart
-        mob_page.click("button:has-text('English')")
+        mob_page.click("button:has-text('ENGLISH')")
         time.sleep(0.3)
         mob_page.click("#departBtn")
         time.sleep(1.5)

@@ -1427,7 +1427,7 @@ def ingest_live_handset_gps(req: LiveGPSReportRequest) -> Dict[str, Any]:
 
 @app.get("/launch", response_class=HTMLResponse, tags=["Mobile Departure & Live Handset GPS"])
 def get_mobile_launch_page() -> str:
-    """Serve multilingual 1-tap mobile departure portal with live active voyage HUD."""
+    """Serve multilingual mobile departure portal with live active voyage HUD (zero emojis)."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1479,7 +1479,7 @@ def get_mobile_launch_page() -> str:
       color: #94a3b8;
       font-size: 0.68rem;
       font-weight: 700;
-      padding: 4px 8px;
+      padding: 4px 10px;
       border-radius: 20px;
       cursor: pointer;
       transition: all 0.15s;
@@ -1490,7 +1490,7 @@ def get_mobile_launch_page() -> str:
       color: #ffffff;
       box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
     }
-    .title { font-size: 1.05rem; font-weight: 800; color: #38bdf8; letter-spacing: 0.02em; }
+    .title { font-size: 1.05rem; font-weight: 800; color: #38bdf8; letter-spacing: 0.04em; }
     .subtitle { font-size: 0.68rem; color: #94a3b8; margin-top: 2px; }
 
     .card {
@@ -1519,8 +1519,8 @@ def get_mobile_launch_page() -> str:
       border: none;
       border-radius: 8px;
       font-weight: 800;
-      font-size: 0.90rem;
-      letter-spacing: 0.03em;
+      font-size: 0.88rem;
+      letter-spacing: 0.04em;
       cursor: pointer;
       display: flex;
       justify-content: center;
@@ -1528,6 +1528,7 @@ def get_mobile_launch_page() -> str:
       gap: 8px;
       margin-bottom: 8px;
       transition: all 0.2s;
+      text-transform: uppercase;
     }
     .btn-green { background: #10b981; color: #022c22; box-shadow: 0 4px 14px rgba(16,185,129,0.3); }
     .btn-green:active { background: #059669; }
@@ -1599,13 +1600,13 @@ def get_mobile_launch_page() -> str:
     <!-- Language Selector Header -->
     <div class="header">
       <div class="lang-bar">
-        <button class="lang-pill active" onclick="setLanguage('en')">🇬🇭 English</button>
-        <button class="lang-pill" onclick="setLanguage('ee')">🌊 Eʋegbe</button>
-        <button class="lang-pill" onclick="setLanguage('fat')">⛵ Mfantse</button>
-        <button class="lang-pill" onclick="setLanguage('ga')">⚓ Ga</button>
+        <button class="lang-pill active" onclick="setLanguage('en')">ENGLISH</button>
+        <button class="lang-pill" onclick="setLanguage('ee')">EWE</button>
+        <button class="lang-pill" onclick="setLanguage('fat')">FANTE</button>
+        <button class="lang-pill" onclick="setLanguage('ga')">GA</button>
       </div>
       <div id="lblAuth" style="font-size:0.65rem;font-weight:700;color:#10b981;letter-spacing:0.05em;text-transform:uppercase;">GHANA MARITIME AUTHORITY</div>
-      <div class="title" id="txtTitle">🇬🇭 ARTISANAL BEACH LAUNCH</div>
+      <div class="title" id="txtTitle">ARTISANAL BEACH LAUNCH</div>
       <div class="subtitle" id="txtSubtitle">Artisanal Vessel Departure Portal &bull; VTS Telemetry Mesh</div>
     </div>
 
@@ -1629,20 +1630,20 @@ def get_mobile_launch_page() -> str:
         <option value="Axim">Axim Landing Beach (Western)</option>
       </select>
 
-      <!-- Unified 1-Tap Departure Button -->
+      <!-- Unified Departure Button -->
       <button id="departBtn" class="btn btn-green" onclick="handleDeparture()">
-        <span>🚀</span> <span id="txtDepartBtn">1-TAP DEPART BEACH (LOCK GPS)</span>
+        <span id="txtDepartBtn">DEPART BEACH (LOCK GPS)</span>
       </button>
 
       <button id="preSosBtn" class="btn btn-red" onclick="triggerSOS()">
-        <span>🚨</span> <span id="txtPreSosBtn">EMERGENCY SOS DISTRESS</span>
+        <span id="txtPreSosBtn">EMERGENCY SOS DISTRESS</span>
       </button>
     </div>
 
     <!-- Active Voyage HUD (Appears when Canoe is At Sea) -->
     <div class="card" id="voyageHUD">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span id="hudStatusPill" style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid #10b981;border-radius:4px;padding:3px 8px;font-size:0.68rem;font-weight:700;">🟢 AT SEA &bull; RADAR ACTIVE</span>
+        <span id="hudStatusPill" style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid #10b981;border-radius:4px;padding:3px 8px;font-size:0.68rem;font-weight:700;">AT SEA &bull; RADAR ACTIVE</span>
         <span id="hudTimer" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;color:#f8fafc;font-weight:700;">00:00:00</span>
       </div>
 
@@ -1666,11 +1667,11 @@ def get_mobile_launch_page() -> str:
       </div>
 
       <button class="btn btn-red" onclick="triggerSOS()">
-        <span>🚨</span> <span id="txtActiveSosBtn">EMERGENCY SOS DISTRESS</span>
+        <span id="txtActiveSosBtn">EMERGENCY SOS DISTRESS</span>
       </button>
 
       <button class="btn btn-blue" onclick="handleReturnShore()">
-        <span>🏖️</span> <span id="txtReturnBtn">SAFE RETURN TO SHORE</span>
+        <span id="txtReturnBtn">SAFE RETURN TO SHORE</span>
       </button>
     </div>
 
@@ -1693,14 +1694,14 @@ def get_mobile_launch_page() -> str:
   <script>
     const DICTIONARY = {
       en: {
-        title: "🇬🇭 ARTISANAL BEACH LAUNCH",
+        title: "ARTISANAL BEACH LAUNCH",
         subtitle: "Artisanal Vessel Departure Portal • VTS Telemetry Mesh",
         canoeName: "CANOE NAME / REGISTRATION",
         phone: "TELEPHONE NUMBER (MSISDN)",
         beach: "DEPARTURE LANDING BEACH",
-        departBtn: "1-TAP DEPART BEACH (LOCK GPS)",
+        departBtn: "DEPART BEACH (LOCK GPS)",
         sosBtn: "EMERGENCY SOS DISTRESS",
-        statusAtSea: "🟢 AT SEA • RADAR ACTIVE",
+        statusAtSea: "AT SEA • RADAR ACTIVE",
         speed: "SPEED",
         heading: "HEADING",
         shoreDist: "OFFSHORE DIST",
@@ -1708,69 +1709,69 @@ def get_mobile_launch_page() -> str:
         returnBtn: "SAFE RETURN TO SHORE",
         mapTitle: "CANOE RADAR FIX",
         gpsReady: "GPS HARDWARE READY",
-        toastDepart: "🚀 Departure logged! Live GPS tracking active on National Radar.",
-        toastSos: "🚨 DISTRESS SENT! Ghana Navy & Coastal VTS alerted!",
-        toastReturn: "🏖️ Moored safely ashore! Voyage ended."
+        toastDepart: "Departure logged. Live GPS tracking active on National Radar.",
+        toastSos: "DISTRESS TRANSMITTED: Ghana Navy & Coastal VTS alerted.",
+        toastReturn: "Moored safely ashore. Voyage concluded."
       },
       ee: {
-        title: "🇬🇭 ƑU DZI YIYI PORTAL",
+        title: "FU DZI YIYI PORTAL",
         subtitle: "Tɔdziʋuwo Ƒe Dzedze Kple Ʋuɖoɖo • VTS Mesh",
-        canoeName: "ƲU ƑE ŊKƆ (CANOE NAME)",
-        phone: "KAƑODZI XƆXƆ (PHONE)",
-        beach: "DZEDZE ƑUTA (BEACH)",
-        departBtn: "TA KPEM ƑU DZI YIYI (LOCK GPS)",
-        sosBtn: "KPƆDƆDƆ ƲU ƲEDIEDIE SOS",
-        statusAtSea: "🟢 LE ƑU DZI • RADAR EKPO",
-        speed: "DUƆ (SPEED)",
-        heading: "MƆ (HEADING)",
-        shoreDist: "TSO ƑUTA (OFFSHORE)",
+        canoeName: "VU FE NKO (CANOE NAME)",
+        phone: "KAFODZI XOXO (PHONE)",
+        beach: "DZEDZE FUTA (BEACH)",
+        departBtn: "DZE FU DZI (LOCK GPS)",
+        sosBtn: "KPODODO VU VEDIEDIE SOS",
+        statusAtSea: "LE FU DZI • RADAR ACTIVE",
+        speed: "DUO (SPEED)",
+        heading: "MO (HEADING)",
+        shoreDist: "TSO FUTA (OFFSHORE)",
         pings: "GPS PINGS",
-        returnBtn: "TRƆ GBƆ VA ƑUTA BLABO",
-        mapTitle: "ƲU LA ƑE TEƑE LE MAP DZI",
-        gpsReady: "GPS LE DƆ WƆM",
-        toastDepart: "🚀 Edze Ƒu dzi! Wo le wò ʋu la kpɔm le National Radar dzi.",
-        toastSos: "🚨 KPƆDƆDƆ ƲU! Ghana Navy kple Asrãkpɔlawo le vavam!",
-        toastReturn: "🏖️ Eva ɖo Ƒuta le dedienunɔme! Akpe."
+        returnBtn: "TRO GBO VA FUTA BLABO",
+        mapTitle: "VU LA FE TEFE LE MAP DZI",
+        gpsReady: "GPS LE DO WOM",
+        toastDepart: "Edze Fu dzi. Wo le wo vu la kpom le National Radar dzi.",
+        toastSos: "KPODODO VU: Ghana Navy kple Asrakpolawo le vavam.",
+        toastReturn: "Eva do Futa le dedienunome. Akpe."
       },
       fat: {
-        title: "🇬🇭 MPOANO DUBAA PORTAL",
+        title: "MPOANO DUBAA PORTAL",
         subtitle: "Mbanyin Mpoano Akwantu Ho Nhyehyɛe",
-        canoeName: "HYƐN NO DZIN (CANOE NAME)",
-        phone: "FƆN NƆMBA (PHONE)",
+        canoeName: "HYEN NO DZIN (CANOE NAME)",
+        phone: "FON NOMBA (PHONE)",
         beach: "MPOANO A WUFIR (BEACH)",
-        departBtn: "BƆ KƆ PO DO (LOCK GPS)",
-        sosBtn: "MBARABA SOS KƆKƆƆ",
-        statusAtSea: "🟢 WƆ PO DO • RADAR HWƐ",
+        departBtn: "BO KO PO DO (LOCK GPS)",
+        sosBtn: "MBARABA SOS KOKOO",
+        statusAtSea: "WO PO DO • RADAR ACTIVE",
         speed: "HARE (SPEED)",
         heading: "KWAN (HEADING)",
         shoreDist: "FIR MPOANO (OFFSHORE)",
         pings: "GPS PINGS",
-        returnBtn: "SAN BRA MPOANO BƆKƆƆ",
-        mapTitle: "HYƐN NO GYINABEW WƆ MAP DO",
-        gpsReady: "GPS WƆ HƆ",
-        toastDepart: "🚀 Wokɔ po do! National Radar rehwɛ wo seesei ara.",
-        toastSos: "🚨 MBARABA SOS! Ghana Asraafo rebɛgye mo!",
-        toastReturn: "🏖️ Woadu mpoano bɔkɔɔ! Akwantu no aba awiei."
+        returnBtn: "SAN BRA MPOANO BOKOO",
+        mapTitle: "HYEN NO GYINABEW WO MAP DO",
+        gpsReady: "GPS WO HO",
+        toastDepart: "Woko po do. National Radar rehwe wo seesei ara.",
+        toastSos: "MBARABA SOS: Ghana Asraafo rebegye mo.",
+        toastReturn: "Woadu mpoano bokoo. Akwantu no aba awiei."
       },
       ga: {
-        title: "🇬🇭 ŊSHƆNAA YELI PORTAL",
-        subtitle: "Ŋshɔŋ Wolɛi Ahe Gbɛjianɔtoo",
-        canoeName: "LƐLƐ LƐ GBƐI (CANOE NAME)",
-        phone: "FƆƆN NƆMBA (PHONE)",
-        beach: "ŊSHƆNAA NI OTSIƆ (BEACH)",
-        departBtn: "TSWAA TEE ŊSHƆ NƆ (LOCK GPS)",
-        sosBtn: "GBI KRƆKRƆ SOS KƆƆKƆƆ",
-        statusAtSea: "🟢 YƐ ŊSHƆ NƆ • RADAR KWƐƆ",
+        title: "NSHONAA YELI PORTAL",
+        subtitle: "Nshon Wolei Ahe Gbejianotoo",
+        canoeName: "LELE LE GBEI (CANOE NAME)",
+        phone: "FOON NOMBA (PHONE)",
+        beach: "NSHONAA NI OTSIO (BEACH)",
+        departBtn: "TSWAA TEE NSHO NO (LOCK GPS)",
+        sosBtn: "GBI KROKRO SOS KOOKOO",
+        statusAtSea: "YE NSHO NO • RADAR ACTIVE",
         speed: "OYELI (SPEED)",
-        heading: "GBƐ (HEADING)",
-        shoreDist: "KƐJƐ ŊSHƆNAA",
+        heading: "GBE (HEADING)",
+        shoreDist: "KEJE NSHONAA",
         pings: "GPS PINGS",
-        returnBtn: "KU OHE OKƐBA ŊSHƆNAA",
-        mapTitle: "LƐLƐ LƐ HE NI EYƆƆ YƐ MAP NƆ",
+        returnBtn: "KU OHE OKEBA NSHONAA",
+        mapTitle: "LELE LE HE NI EYOO YE MAP NO",
         gpsReady: "GPS MIITSU NII",
-        toastDepart: "🚀 Otee ŋshɔ nɔ! Radar miikwɛ bo amrɔ nɛɛ.",
-        toastSos: "🚨 GBI KRƆKRƆ SOS! Ghana Navy miiba nɔŋŋ!",
-        toastReturn: "🏖️ Oku ohe kɛba ŋshɔnaa shweshweeshwe!"
+        toastDepart: "Otee nsho no. Radar miikwe bo amro nee.",
+        toastSos: "GBI KROKRO SOS: Ghana Navy miiba nonn.",
+        toastReturn: "Oku ohe keba nshonaa shweshweeshwe."
       }
     };
 
@@ -1817,11 +1818,10 @@ def get_mobile_launch_page() -> str:
       setTimeout(() => { t.style.display = 'none'; }, 4000);
     }
 
-    // Authentic Ghanaian Canoe Leaflet Icon
+    // Authentic Ghanaian Canoe Leaflet Icon (Zero Emojis)
     function createCanoeIcon(status, heading) {
       const isAtSea = status === 'AT_SEA';
       const isSOS = status === 'SOS_DISTRESS';
-      const color = isSOS ? '#ef4444' : (isAtSea ? '#38bdf8' : '#10b981');
       if (isSOS) {
         return L.divIcon({
           className: 'canoe-ico',
@@ -1914,15 +1914,14 @@ def get_mobile_launch_page() -> str:
           body: JSON.stringify(payload)
         });
         if (resp.ok) {
-          document.getElementById('gpsPill').innerText = '🟢 PING ' + pingCount + ' RECEIVED BY VTS';
+          document.getElementById('gpsPill').innerText = 'PING ' + pingCount + ' RECEIVED BY VTS';
           document.getElementById('valPings').innerText = pingCount;
         }
       } catch (e) {
-        // Cache in offline queue
         let queue = JSON.parse(localStorage.getItem('geomesh_offline_queue') || '[]');
         queue.push(payload);
         localStorage.setItem('geomesh_offline_queue', JSON.stringify(queue));
-        document.getElementById('gpsPill').innerText = '⚠️ OFFLINE (QUEUED: ' + queue.length + ')';
+        document.getElementById('gpsPill').innerText = 'OFFLINE (QUEUED: ' + queue.length + ')';
       }
     }
 
@@ -1933,7 +1932,6 @@ def get_mobile_launch_page() -> str:
 
       showToast((DICTIONARY[currentLang] || DICTIONARY.en).toastDepart);
 
-      // Start elapsed timer
       secondsElapsed = 0;
       timerInterval = setInterval(() => {
         secondsElapsed += 1;
@@ -1943,7 +1941,6 @@ def get_mobile_launch_page() -> str:
         document.getElementById('hudTimer').innerText = `${hrs}:${mins}:${secs}`;
       }, 1000);
 
-      // Acquire initial GPS lock and start watching
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           pos => {
@@ -1986,7 +1983,6 @@ def get_mobile_launch_page() -> str:
         sendPing(false);
       }
 
-      // Heartbeat ping every 3s
       setInterval(() => {
         if (isUnderway) sendPing(false);
       }, 3000);
@@ -2526,11 +2522,11 @@ def get_map_dashboard() -> str:
   <!-- Floating Tactical Layer Controls -->
   <div id="mapLayerControls">
     <span style="color:#64748b;font-weight:700;">LAYERS:</span>
-    <label style="color:#f59e0b;"><input type="checkbox" id="layerAIS" checked onchange="toggleLayer('AIS')"> 🚢 Commercial Ships</label>
-    <label style="color:#10b981;"><input type="checkbox" id="layerCanoes" checked onchange="toggleLayer('CANOES')"> 🛶 Artisanal Canoes</label>
-    <label style="color:#38bdf8;"><input type="checkbox" id="layerIEZ" checked onchange="toggleLayer('IEZ')"> ━━ 6NM Inshore</label>
-    <label style="color:#06b6d4;"><input type="checkbox" id="layerTowers" checked onchange="toggleLayer('TOWERS')"> 🗼 Cell Masts</label>
-    <label style="color:#ef4444;"><input type="checkbox" id="layerSAR" checked onchange="toggleLayer('SAR')"> ⭕ SAR Zones</label>
+    <label style="color:#f59e0b;"><input type="checkbox" id="layerAIS" checked onchange="toggleLayer('AIS')"> COMMERCIAL SHIPS</label>
+    <label style="color:#10b981;"><input type="checkbox" id="layerCanoes" checked onchange="toggleLayer('CANOES')"> ARTISANAL CANOES</label>
+    <label style="color:#38bdf8;"><input type="checkbox" id="layerIEZ" checked onchange="toggleLayer('IEZ')"> 6NM INSHORE ZONE</label>
+    <label style="color:#06b6d4;"><input type="checkbox" id="layerTowers" checked onchange="toggleLayer('TOWERS')"> CELL MASTS</label>
+    <label style="color:#ef4444;"><input type="checkbox" id="layerSAR" checked onchange="toggleLayer('SAR')"> SAR ZONES</label>
   </div>
 
   <!-- Floating Maritime Legend with Authentic SVGs -->
@@ -2617,14 +2613,14 @@ def get_map_dashboard() -> str:
       <div class="stat-badge">ON SHORE: <span id="statOnShore" class="stat-val" style="color:#10b981;">0</span></div>
       <div class="stat-badge" style="border-color:rgba(245,158,11,0.3);">LIVE SHIPS: <span id="statShips" class="stat-val" style="color:#f59e0b;">0</span></div>
       <div class="stat-badge" id="sosBadgeWrapper" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);">
-        🚨 OVERDUE / SOS: <span id="statSOS" class="stat-sos">0</span>
+        OVERDUE / SOS: <span id="statSOS" class="stat-sos">0</span>
       </div>
     </div>
   </div>
 
   <!-- Sector Navigation Floating Pills -->
   <div id="navsectors">
-    <button class="nav-btn active" onclick="zoomSector('ALL', this)">🇬🇭 All Coast (550km)</button>
+    <button class="nav-btn active" onclick="zoomSector('ALL', this)">ALL COAST (550km)</button>
     <button class="nav-btn" onclick="zoomSector('WESTERN', this)">Western (Axim / Takoradi)</button>
     <button class="nav-btn" onclick="zoomSector('CENTRAL', this)">Central (Elmina / Winneba)</button>
     <button class="nav-btn" onclick="zoomSector('ACCRA', this)">Greater Accra (Tema / Ada)</button>
@@ -2643,22 +2639,22 @@ def get_map_dashboard() -> str:
     <!-- Navigation Tabs for Tactical Deck (3x2 Grid) -->
     <div class="deck-tabs">
       <button class="tab-btn active" onclick="switchDeckTab('LOCATE', this)">
-        <span style="font-size:0.85rem;">🔍</span><span>LOCATE</span>
+        <span>LOCATE</span>
       </button>
       <button class="tab-btn" onclick="switchDeckTab('PROBE', this)">
-        <span style="font-size:0.85rem;">⚡</span><span>PROBE</span>
+        <span>PROBE</span>
       </button>
       <button class="tab-btn" onclick="switchDeckTab('SDR', this)">
-        <span style="font-size:0.85rem;">📡</span><span>SDR RF</span>
+        <span>SDR RF</span>
       </button>
       <button class="tab-btn" onclick="switchDeckTab('SAR', this)">
-        <span style="font-size:0.85rem;">🚨</span><span>SAR</span>
+        <span>SAR</span>
       </button>
       <button class="tab-btn" onclick="switchDeckTab('ROSTER', this)">
-        <span style="font-size:0.85rem;">🛶</span><span>FLEET</span>
+        <span>FLEET</span>
       </button>
       <button class="tab-btn" onclick="switchDeckTab('OPS', this)">
-        <span style="font-size:0.85rem;">⚙️</span><span>OPS</span>
+        <span>OPS</span>
       </button>
     </div>
 
@@ -2667,7 +2663,7 @@ def get_map_dashboard() -> str:
       <div id="tabContentLocate">
         <div class="card">
           <h3 style="color:var(--accent-cyan);">
-            <span>🛰️ Real-Time GSM Locator</span>
+            <span>GSM SUBSCRIBER LOCATOR</span>
           </h3>
           <p style="font-size:0.71rem;color:var(--text-muted);line-height:1.4;margin:4px 0 8px 0;">
             Pinpoint feature phones instantly via silent radio paging. Verifies if a canoe is missing at sea or safely landed at another beach (e.g. <strong>Keta &rarr; Vodza</strong>).
@@ -2675,16 +2671,16 @@ def get_map_dashboard() -> str:
           <div style="display:flex;gap:6px;margin-bottom:8px;">
             <input id="locateInput" type="text" placeholder="Phone or Canoe Name (e.g. Dzidula)" list="canoeSuggestions" />
             <datalist id="canoeSuggestions"></datalist>
-            <button class="btn btn-sm" onclick="locateCanoeRealtime()" style="white-space:nowrap;">🔍 LOCATE</button>
+            <button class="btn btn-sm" onclick="locateCanoeRealtime()" style="white-space:nowrap;">LOCATE</button>
           </div>
 
           <!-- Quick-Pick Active Fleet Chips -->
           <div style="font-size:0.65rem;color:#64748b;font-weight:700;margin-bottom:4px;">ACTIVE FLEET QUICK-SELECT:</div>
           <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">
-            <button class="filter-pill" onclick="quickLocate('0243875318')">🛶 Agbe Yeye</button>
-            <button class="filter-pill" onclick="quickLocate('+233240001122')">🛶 Volta King</button>
-            <button class="filter-pill" onclick="quickLocate('+233241119988')">🛶 Canoe-9988</button>
-            <button class="filter-pill" onclick="quickLocate('+233551808220')">🛶 keta baoat</button>
+            <button class="filter-pill" onclick="quickLocate('0243875318')">Agbe Yeye</button>
+            <button class="filter-pill" onclick="quickLocate('+233240001122')">Volta King</button>
+            <button class="filter-pill" onclick="quickLocate('+233241119988')">Canoe-9988</button>
+            <button class="filter-pill" onclick="quickLocate('+233551808220')">keta baoat</button>
           </div>
 
           <div id="locateResultBox" style="font-size:0.72rem;line-height:1.4;background:#050914;border:1px solid #1e293b;border-radius:6px;padding:8px;display:none;"></div>
@@ -2695,7 +2691,7 @@ def get_map_dashboard() -> str:
       <div id="tabContentProbe" style="display:none;">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <strong style="color:var(--accent-cyan);font-size:0.75rem;">⚡ 3GPP SILENT SIP RADIO PROBE</strong>
+            <strong style="color:var(--accent-cyan);font-size:0.75rem;">3GPP SILENT SIP RADIO PROBE</strong>
             <span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid #10b981;">ZERO BILLING</span>
           </div>
           <p style="font-size:0.68rem;color:var(--text-faint);margin:0 0 8px 0;line-height:1.35;">
@@ -2703,7 +2699,7 @@ def get_map_dashboard() -> str:
           </p>
           <div style="display:flex;gap:6px;margin-bottom:8px;">
             <input type="text" id="probePhoneInput" value="0243875318" placeholder="Phone e.g. 0243875318" />
-            <button class="btn btn-sm btn-emerald" onclick="runSilentProbe('NORMAL')">⚡ PROBE</button>
+            <button class="btn btn-sm btn-emerald" onclick="runSilentProbe('NORMAL')">PROBE</button>
           </div>
 
           <div id="probeResultBox" style="display:none;background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:8px;font-size:0.72rem;">
@@ -2722,7 +2718,7 @@ def get_map_dashboard() -> str:
       <div id="tabContentSDR" style="display:none;">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <strong style="color:var(--accent-cyan);font-size:0.75rem;">📡 SDR DIRECTION FINDER</strong>
+            <strong style="color:var(--accent-cyan);font-size:0.75rem;">SDR DIRECTION FINDER</strong>
             <span class="badge" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid #38bdf8;">RF UPLINK</span>
           </div>
           <p style="font-size:0.70rem;color:var(--text-muted);line-height:1.35;margin-bottom:8px;">
@@ -2737,15 +2733,15 @@ def get_map_dashboard() -> str:
             <div>
               <label style="font-size:0.65rem;color:#64748b;font-weight:700;">SDR RECEIVING STATION</label>
               <select id="sdrStationSelect">
-                <option value="DRONE_KETA_SAR_1">🚁 Navy Drone UAV 01 (Lifeseeker)</option>
-                <option value="STATION_KETA_MAST">🗼 Keta Cape St Paul SDR Mast</option>
-                <option value="NAVY_P30_PATROL">⚓ Navy P30 Patrol Craft SDR</option>
+                <option value="DRONE_KETA_SAR_1">Navy Drone UAV 01 (Lifeseeker)</option>
+                <option value="STATION_KETA_MAST">Keta Cape St Paul SDR Mast</option>
+                <option value="NAVY_P30_PATROL">Navy P30 Patrol Craft SDR</option>
               </select>
             </div>
             
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-              <button class="btn btn-sm btn-emerald" onclick="executeSDRScan()">🚀 SCAN RF PULSE</button>
-              <button class="btn btn-sm" onclick="executeSDRTriangulate()">📐 MULTI-STATION FIX</button>
+              <button class="btn btn-sm btn-emerald" onclick="executeSDRScan()">SCAN RF PULSE</button>
+              <button class="btn btn-sm" onclick="executeSDRTriangulate()">MULTI-STATION FIX</button>
             </div>
           </div>
 
@@ -2763,7 +2759,7 @@ def get_map_dashboard() -> str:
       <div id="tabContentSAR" style="display:none;">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <strong style="color:var(--accent-rose);font-size:0.75rem;">🚨 OVERDUE CANOE &bull; SAR HOTLINE</strong>
+            <strong style="color:var(--accent-rose);font-size:0.75rem;">OVERDUE CANOE &bull; SAR HOTLINE</strong>
             <span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid #ef4444;">GMA &amp; NAVY</span>
           </div>
           <p style="font-size:0.70rem;color:var(--text-muted);line-height:1.35;margin-bottom:8px;">
@@ -2785,16 +2781,16 @@ def get_map_dashboard() -> str:
       <div id="tabContentRoster" style="display:none;">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <strong style="font-size:0.75rem;color:var(--accent-cyan);">🛶 ENROLLED ARTISANAL FLEET</strong>
+            <strong style="font-size:0.75rem;color:var(--accent-cyan);">ENROLLED ARTISANAL FLEET</strong>
             <span id="fleetCountBadge" style="font-size:0.68rem;color:#64748b;">8 canoes</span>
           </div>
 
           <!-- Status Filter Bar -->
           <div class="fleet-filter-bar">
             <button class="filter-pill active" onclick="filterFleet('ALL', this)">All</button>
-            <button class="filter-pill" onclick="filterFleet('AT_SEA', this)">🌊 At Sea</button>
-            <button class="filter-pill" onclick="filterFleet('ON_SHORE', this)">🏖️ Shore</button>
-            <button class="filter-pill filter-sos" onclick="filterFleet('SOS', this)">🚨 SOS</button>
+            <button class="filter-pill" onclick="filterFleet('AT_SEA', this)">AT SEA</button>
+            <button class="filter-pill" onclick="filterFleet('ON_SHORE', this)">SHORE</button>
+            <button class="filter-pill filter-sos" onclick="filterFleet('SOS', this)">SOS</button>
           </div>
 
           <div style="margin-bottom:6px;">
@@ -2810,7 +2806,7 @@ def get_map_dashboard() -> str:
       <!-- TAB 6: OPERATIONS & SYSTEM CONFIG -->
       <div id="tabContentOPS" style="display:none;">
         <div class="card">
-          <strong style="color:var(--accent-cyan);font-size:0.75rem;">📡 LIVE AIS STREAM STATUS</strong>
+          <strong style="color:var(--accent-cyan);font-size:0.75rem;">LIVE AIS STREAM STATUS</strong>
           <div style="font-size:0.70rem;color:#cbd5e1;line-height:1.5;margin-top:4px;">
             Feed: <strong>AISStream.io WebSocket</strong><br>
             Coverage: <strong>Gulf of Guinea / Ghana Territorial Waters</strong><br>
@@ -2820,7 +2816,7 @@ def get_map_dashboard() -> str:
         </div>
 
         <div class="card">
-          <strong style="color:var(--accent-cyan);font-size:0.75rem;">➕ ENROLL NEW ARTISANAL CANOE</strong>
+          <strong style="color:var(--accent-cyan);font-size:0.75rem;">ENROLL NEW ARTISANAL CANOE</strong>
           <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
             <input id="regPhone" type="text" placeholder="Mobile Number (e.g. 0244123456)" />
             <input id="regName" type="text" placeholder="Canoe Name (e.g. Nyame Nti)" />
@@ -2845,11 +2841,11 @@ def get_map_dashboard() -> str:
         </div>
 
         <div class="card">
-          <strong style="color:var(--accent-cyan);font-size:0.75rem;">💾 DATA EXPORT &amp; MAINTENANCE</strong>
+          <strong style="color:var(--accent-cyan);font-size:0.75rem;">DATA EXPORT &amp; MAINTENANCE</strong>
           <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-            <button class="btn btn-sm btn-outline" onclick="exportData('KML')">📥 Export Fleet Positions (KML / GeoJSON)</button>
-            <button class="btn btn-sm btn-outline" onclick="exportData('CSV')">📄 Export Search &amp; Rescue Incident Log (CSV)</button>
-            <button class="btn btn-sm btn-outline" onclick="clearRadar()">🧹 Clear Ephemeral Radar Marks</button>
+            <button class="btn btn-sm btn-outline" onclick="exportData('KML')">EXPORT FLEET POSITIONS (KML)</button>
+            <button class="btn btn-sm btn-outline" onclick="exportData('CSV')">EXPORT SAR INCIDENTS (CSV)</button>
+            <button class="btn btn-sm btn-outline" onclick="clearRadar()">CLEAR TEST RADAR MARKS</button>
           </div>
         </div>
       </div>
@@ -2860,10 +2856,10 @@ def get_map_dashboard() -> str:
   <div id="bottomDock">
     <div class="dock-bar" onclick="toggleBottomDock()">
       <div style="display:flex;align-items:center;gap:8px;">
-        <span style="color:#10b981;">⚡ TELEMETRY STREAM:</span>
+        <span style="color:#10b981;">TELEMETRY STREAM:</span>
         <span id="lastEventTicker" style="color:#cbd5e1;">National surveillance active across 550km coastline...</span>
       </div>
-      <span id="dockToggleBtn" style="color:var(--accent-cyan);font-weight:700;">▲ EXPAND</span>
+      <span id="dockToggleBtn" style="color:var(--accent-cyan);font-weight:700;">EXPAND</span>
     </div>
     <div id="eventLogContainer" class="event-log">
       <div id="eventLogBox">
@@ -3106,10 +3102,10 @@ def get_map_dashboard() -> str:
       const btn = document.getElementById('dockToggleBtn');
       if (el.style.display === 'block') {
         el.style.display = 'none';
-        btn.innerText = '▲ EXPAND';
+        btn.innerText = 'EXPAND';
       } else {
         el.style.display = 'block';
-        btn.innerText = '▼ COLLAPSE';
+        btn.innerText = 'COLLAPSE';
       }
     }
 
@@ -3195,17 +3191,17 @@ def get_map_dashboard() -> str:
             const targetGroup = isCanoe ? layerGroups.CANOES : layerGroups.AIS;
 
             let titleName = v.ship_name || (isCanoe ? "ARTISANAL CANOE" : "COMMERCIAL VESSEL");
-            let popupHtml = `<b>${isCanoe ? "🛶 " + titleName : "🚢 " + titleName}</b><br>` +
+            let popupHtml = `<b>${titleName}</b><br>` +
               `Type: <strong>${v.vessel_type || (isCanoe ? "CANOE" : "TANKER")}</strong><br>` +
               `Status: <span style="font-weight:700;color:${v.status === 'SOS_DISTRESS' ? '#ef4444' : (v.status === 'ON_SHORE' ? '#10b981' : '#38bdf8')}">${v.status}</span><br>` +
               `Speed: ${(v.speed_mps * 1.94384).toFixed(1)} kts &bull; Heading: ${v.heading_deg.toFixed(0)}&deg;<br>` +
               `Position: [${v.position.lat.toFixed(4)}, ${v.position.lon.toFixed(4)}]<br>`;
 
             if (v.is_iez_violation) {
-              popupHtml += '<span style="color:#ef4444;font-weight:800;">🚨 6NM INSHORE ZONE VIOLATION (Act 625)</span><br>';
+              popupHtml += '<span style="color:#ef4444;font-weight:800;">6NM INSHORE ZONE VIOLATION (Act 625)</span><br>';
             }
             if (v.is_live) {
-              popupHtml += '<span style="color:#10b981;font-weight:700;">🟢 LIVE SATELLITE/VHF AIS</span>';
+              popupHtml += '<span style="color:#10b981;font-weight:700;">LIVE SATELLITE/VHF AIS</span>';
             }
 
             if (vesselMarkers[v.entity_id]) {
@@ -3225,7 +3221,7 @@ def get_map_dashboard() -> str:
             // Log IEZ violation once
             if (v.is_iez_violation && !v._iezLogged) {
               v._iezLogged = true;
-              logEvent(`🚨 [IEZ INTRUSION] Commercial vessel ${v.ship_name || v.entity_id} entered Ghana 6NM Artisanal Reserve (Fisheries Act 625)!`, 'CRITICAL');
+              logEvent(`[IEZ INTRUSION] Commercial vessel ${v.ship_name || v.entity_id} entered Ghana 6NM Artisanal Reserve (Fisheries Act 625)!`, 'CRITICAL');
             }
           });
 
@@ -3245,7 +3241,7 @@ def get_map_dashboard() -> str:
                   window.hazardLine.setLatLngs([tanker.getLatLng(), canoe.getLatLng()]);
                 }
               }
-              logEvent(`🚨 [CONVERGENCE HAZARD] Tanker ${h.threat_vessel} converging on ${h.canoe_name}! CPA: ${h.cpa_nm} NM in ${h.tcpa_minutes}m! Robocall dispatched in ${h.language}!`, 'CRITICAL');
+              logEvent(`[CONVERGENCE HAZARD] Tanker ${h.threat_vessel} converging on ${h.canoe_name}! CPA: ${h.cpa_nm} NM in ${h.tcpa_minutes}m! Robocall dispatched in ${h.language}!`, 'CRITICAL');
             });
           } else if (window.hazardLine) {
             map.removeLayer(window.hazardLine);
@@ -3314,7 +3310,7 @@ def get_map_dashboard() -> str:
         const isSOS = s.status === 'SOS_DISTRESS' || s.status === 'OVERDUE';
         const isSea = s.status === 'AT_SEA';
         const badgeColor = isSOS ? '#ef4444' : (isSea ? '#0284c7' : '#059669');
-        const badgeText = isSOS ? '🚨 SOS' : (isSea ? '🌊 AT SEA' : '🏖️ SHORE');
+        const badgeText = isSOS ? 'SOS' : (isSea ? 'AT SEA' : 'SHORE');
         const bat = s.battery_pct || (isSea ? 84 : 96);
         const batColor = bat > 50 ? '#10b981' : (bat > 20 ? '#f59e0b' : '#ef4444');
 
@@ -3324,21 +3320,21 @@ def get_map_dashboard() -> str:
         return `
           <div style="background:rgba(3,7,18,0.85);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px;font-size:0.70rem;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-              <strong style="color:#f8fafc;cursor:pointer;" onclick="flyToCanoe('${s.phone_number}', ${lat}, ${lon})">🛶 ${s.canoe_name}</strong>
+              <strong style="color:#f8fafc;cursor:pointer;" onclick="flyToCanoe('${s.phone_number}', ${lat}, ${lon})">${s.canoe_name}</strong>
               <span style="font-size:0.62rem;font-weight:700;color:${badgeColor};border:1px solid ${badgeColor};padding:1px 5px;border-radius:3px;">${badgeText}</span>
             </div>
             <div style="color:#94a3b8;font-size:0.66rem;margin-bottom:6px;">
               ${s.phone_number} &bull; ${s.landing_beach} (${s.language})
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-              <span style="font-size:0.65rem;color:#cbd5e1;">🔋 <span style="color:${batColor};font-weight:700;">${bat}%</span> &bull; 📶 4/4 MTN</span>
+              <span style="font-size:0.65rem;color:#cbd5e1;">BAT: <span style="color:${batColor};font-weight:700;">${bat}%</span> &bull; GSM: 4/4 MTN</span>
               <span style="font-size:0.65rem;color:#64748b;">${s.distance_offshore_km ? s.distance_offshore_km.toFixed(1) + 'km out' : 'Ashore'}</span>
             </div>
             <div style="display:flex;gap:4px;">
-              <button class="btn btn-sm" style="flex:1;padding:3px 4px;background:#0284c7;" onclick="flyToCanoe('${s.phone_number}', ${lat}, ${lon})">📍 Focus</button>
-              <button class="btn btn-sm btn-emerald" style="flex:1;padding:3px 4px;" onclick="quickLocate('${s.phone_number}')">⚡ Ping</button>
-              <button class="btn btn-sm btn-red" style="padding:3px 6px;" onclick="triggerKeypadSOSManual('${s.phone_number}')">🚨 SOS</button>
-              <button class="btn btn-sm" style="background:#334155;padding:3px 6px;" onclick="deleteCanoe('${s.phone_number}')">🗑️</button>
+              <button class="btn btn-sm" style="flex:1;padding:3px 4px;background:#0284c7;" onclick="flyToCanoe('${s.phone_number}', ${lat}, ${lon})">FOCUS</button>
+              <button class="btn btn-sm btn-emerald" style="flex:1;padding:3px 4px;" onclick="quickLocate('${s.phone_number}')">PING</button>
+              <button class="btn btn-sm btn-red" style="padding:3px 6px;" onclick="triggerKeypadSOSManual('${s.phone_number}')">SOS</button>
+              <button class="btn btn-sm" style="background:#334155;padding:3px 6px;" onclick="deleteCanoe('${s.phone_number}')">DEL</button>
             </div>
           </div>
         `;
@@ -3418,7 +3414,7 @@ def get_map_dashboard() -> str:
           if (data.incidents.length === 0) {
             box.innerHTML = `
               <div style="text-align:center;padding:25px 10px;color:#10b981;">
-                <div style="font-size:1.6rem;margin-bottom:6px;">🟢</div>
+                <div style="font-size:0.85rem;font-weight:700;color:var(--accent-emerald);margin-bottom:6px;letter-spacing:1px;">ALL CLEAR</div>
                 <div style="font-weight:700;font-size:0.78rem;color:#f8fafc;">COASTLINE SECTOR NORMAL</div>
                 <div style="font-size:0.68rem;color:#94a3b8;margin-top:2px;">No active distress alerts or overdue vessels.</div>
               </div>
@@ -3463,7 +3459,7 @@ def get_map_dashboard() -> str:
             return `
               <div style="background:rgba(3,7,18,0.9);border:1px solid ${isFocused ? '#f59e0b' : 'rgba(239,68,68,0.3)'};border-radius:6px;padding:8px;font-size:0.70rem;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
-                  <strong style="color:#ef4444;">🚨 ${inc.canoe_name || inc.phone_number}</strong>
+                  <strong style="color:#ef4444;">DISTRESS: ${inc.canoe_name || inc.phone_number}</strong>
                   <span style="font-size:0.62rem;color:#f59e0b;font-weight:700;">GUINEA CURRENT DRIFT</span>
                 </div>
                 <div style="color:#cbd5e1;font-size:0.66rem;margin-bottom:6px;">
@@ -3495,7 +3491,7 @@ def get_map_dashboard() -> str:
           body: JSON.stringify({ phone_number: phone })
         });
         if (resp.ok) {
-          logEvent(`🚨 [SAR DECLARED] National rescue operations activated for ${phone}!`, 'CRITICAL');
+          logEvent(`[SAR DECLARED] National rescue operations activated for ${phone}!`, 'CRITICAL');
           await refreshSAR();
           await refreshRoster();
         }
@@ -3551,13 +3547,13 @@ def get_map_dashboard() -> str:
 
         box.innerHTML = `
           <div style="font-weight:700;color:${badgeColor};margin-bottom:4px;">
-            ${isRelocated ? '🟢 SAFE ON SHORE &bull; RELOCATED' : (isSafeHome ? '🟢 SAFE AT HOME BEACH' : '🌊 ACTIVE AT SEA')}
+            ${isRelocated ? 'SAFE ON SHORE &bull; RELOCATED' : (isSafeHome ? 'SAFE AT HOME BEACH' : 'ACTIVE AT SEA')}
           </div>
           <div>Canoe: <strong>${data.canoe_name}</strong> (${data.phone_number})</div>
           <div>Serving Mast: <strong>${data.nearest_cell_tower}</strong> &bull; Latency: ${data.latency_ms}ms</div>
           <div>Nearest Beach: <strong>${data.nearest_beach}</strong> (${data.distance_from_home_km} km from ${data.home_beach})</div>
           <div style="margin-top:6px;">
-            <button class="btn btn-sm btn-emerald" style="width:100%;" onclick="map.flyTo([${data.lat}, ${data.lon}], 13)">📍 Focus on Radar</button>
+            <button class="btn btn-sm btn-emerald" style="width:100%;" onclick="map.flyTo([${data.lat}, ${data.lon}], 13)">FOCUS ON RADAR</button>
           </div>
         `;
 
@@ -3708,7 +3704,7 @@ def get_map_dashboard() -> str:
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone_number: phone, ussd_code: '*920*44#' })
         });
-        logEvent(`🚨 [KEYPAD SOS *920*44#] Distress received from ${phone}!`, 'CRITICAL');
+        logEvent(`[KEYPAD SOS *920*44#] Distress received from ${phone}!`, 'CRITICAL');
         await refreshSAR();
         await refreshRoster();
       } catch (e) {}
