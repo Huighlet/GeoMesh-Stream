@@ -8,6 +8,7 @@ HMAC-SHA256 authenticated carrier webhooks (MTN/Telecel/Hubtel), and durable SQL
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import enum
 import hashlib
@@ -279,9 +280,23 @@ class MaritimeVoiceAlertService:
                     "Message": payload["audio_message"],
                     "ClientReference": call_id,
                 }).encode("utf-8")
-                req = urllib.request.Request(hubtel_url, data=req_data, headers={"Content-Type": "application/json"})
-                provider = "HUBTEL_GHANA"
-                status = "RINGING"
+                credentials = f"{self.hubtel_client_id}:{self.hubtel_client_secret}".encode("utf-8")
+                auth_header = f"Basic {base64.b64encode(credentials).decode('ascii')}"
+                req = urllib.request.Request(
+                    hubtel_url,
+                    data=req_data,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": auth_header,
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    if 200 <= resp.status < 300:
+                        provider = "HUBTEL_GHANA"
+                        status = "RINGING"
+                    else:
+                        status = "FALLBACK_DISPATCHED"
             except Exception:
                 status = "FALLBACK_DISPATCHED"
 
@@ -581,15 +596,19 @@ class TelecomPassiveGateway:
             "current_status": str(sub.status),
             "safety_assessment": assessment,
             "current_coordinates": {"lat": current_pt.lat, "lon": current_pt.lon},
+            "lat": current_pt.lat,
+            "lon": current_pt.lon,
             "nearest_beach": nearest_beach,
             "distance_from_home_km": dist_from_home_km,
             "distance_offshore_km": dist_offshore_km,
             "last_seen_tower": sub.last_seen_tower or "TOWER_KETA_SEAWARD",
             "tower_name": tower_name,
+            "nearest_cell_tower": tower_name,
             "timing_advance": sub.last_timing_advance,
             "signal_rssi_dbm": -74,
             "radio_carrier": "MTN / Telecel Ghana (Passive Signaling)",
             "ping_latency_ms": 138,
+            "latency_ms": 138,
             "display_message_en": display_en,
             "display_message_local": display_local,
             "ussd_screen_preview": (

@@ -2,7 +2,7 @@
 
 **Real-Time Ghana Maritime Vessel Stream, Collision Avoidance & Coastal Geofence Engine**
 
-[![Build Status](https://img.shields.io/badge/tests-42%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
+[![Build Status](https://img.shields.io/badge/tests-71%20passed-brightgreen.svg)](https://github.com/Huighlet/GeoMesh-Stream)
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Zero AI Slop](https://img.shields.io/badge/codebase-zero%20ai%20slop-black.svg)](https://github.com/Huighlet/GeoMesh-Stream)
@@ -24,6 +24,24 @@ Coastal maritime environments across Ghana's **550km Gulf of Guinea coastline** 
 8. **Guinea Current Search-and-Rescue (SAR) Dead-Reckoning:** Models physical ocean currents ($\approx 1.4\text{ kt}$ Eastward) and wind leeway to calculate search datums and generate formal SAR Incident Dockets for the Ghana Maritime Authority (GMA) and Ghana Navy (Western and Eastern Naval Commands).
 9. **Direct NMEA 0183 AIS Radio Decoder:** Zero-dependency bit-level parser for raw VHF `!AIVDM` sentences from coastal AIS stations (Types 1, 2, 3 position reports and Type 5 static voyage data).
 10. **Durable SQLite WAL Storage & Carrier Webhook Gateway:** Zero-loss persistence for subscribers, voyages, and SAR dockets, paired with HMAC-SHA256 authenticated webhook ingestion for MTN Ghana, Telecel, and Hubtel, with a clean operational registry.
+
+---
+
+## Operational Command Interfaces & Visual Verification
+
+### 1. National Coastal VTS Tactical Radar (`/`)
+![GH-MARSAR National Command Radar](docs/screenshots/no_emoji_01_command_radar_overview.png)
+*IEC 62288 / C4ISR dark tactical radar tracking Ghana's 550km coastline from Half Assini to Aflao. Displays directional SVG silhouettes for artisanal wooden canoes (emerald on shore, cyan at sea, pulsing red in distress) and commercial Class-A AIS tankers, cargo ships, trawlers, and tugs, alongside Ghana's 6NM Inshore Exclusion Zone (Act 625).*
+
+### 2. Guinea Current Search-and-Rescue (SAR) & SDR RF Direction Finder
+| Guinea Current SAR Watchdog (`SAR` Tab) | Sovereign SDR RF Direction Finder (`SDR RF` Tab) |
+| :---: | :---: |
+| ![SAR Watchdog](docs/screenshots/no_emoji_03_sar_tab.png) | ![SDR RF Intercept](docs/screenshots/no_emoji_05_sdr_rf_tab.png) |
+
+### 3. Multilingual Mobile Beach Departure Portal (`/launch`)
+| English Departure Portal | Ewe (`Eʋegbe`) Departure Portal | Active Sea Voyage HUD |
+| :---: | :---: | :---: |
+| ![Mobile English](docs/screenshots/no_emoji_08_mobile_launch_english.png) | ![Mobile Ewe](docs/screenshots/no_emoji_09_mobile_launch_ewe.png) | ![Active Voyage HUD](docs/screenshots/no_emoji_11_mobile_voyage_hud.png) |
 
 ---
 
@@ -238,7 +256,7 @@ tests/test_telecom.py::test_passive_handover_zero_touch_lifecycle PASSED [ 94%]
 tests/test_telecom.py::test_multilingual_voice_alert_scripts PASSED      [ 97%]
 tests/test_telecom.py::test_telecom_rest_endpoints PASSED                [100%]
 
-======================== 39 passed in 2.89s ========================
+======================== 71 passed in 23.14s ========================
 `
 
 ### Running Standalone Fleet Server & Leaflet.js Dashboard

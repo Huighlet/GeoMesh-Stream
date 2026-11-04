@@ -166,6 +166,7 @@ class SDRCellularPayload:
         station_id: Optional[str] = None,
         band: SDRBand = SDRBand.GSM_900,
         known_approx_pos: Optional[Tuple[float, float]] = None,
+        canoe_name: str = "Agbe Yeye (Canoe)",
     ) -> SDRTargetFix:
         r"""
         Execute an external, zero-interaction cellular radio sweep.
@@ -243,7 +244,7 @@ class SDRCellularPayload:
 
         return SDRTargetFix(
             phone_number=clean_phone,
-            canoe_name="Agbe Yeye (Canoe)",
+            canoe_name=canoe_name,
             lat=round(resolved_point.lat, 5),
             lon=round(resolved_point.lon, 5),
             accuracy_m=round(max(15.0, dist_m * 0.015), 1),  # ±1.5% range error

@@ -19,13 +19,16 @@ from pydantic import BaseModel, Field
 from geomesh.ais import AISDecoder, AISPositionReport, AISStaticReport
 from geomesh.engine import GeoMeshEngine
 from geomesh.geofence import PolygonGeofence, RadialGeofence
+from geomesh.math import haversine_distance, initial_bearing
 from geomesh.sar import GuineaCurrentSARModel, SARWatchdog
 from geomesh.storage import DurableStore, SARIncidentRecord, SubscriberRecord
 from geomesh.telecom import (
+    COASTAL_BEACH_COORDINATES,
     Language,
     MaritimeVoiceAlertService,
     TelecomPassiveGateway,
     VesselStatus,
+    find_nearest_beach,
     normalize_ghana_phone,
 )
 from geomesh.opencellid import get_opencellid_manager
@@ -1249,15 +1252,30 @@ def scan_sdr_pocket_phone(req: SDRScanRequest) -> Dict[str, Any]:
     elif clean_phone.endswith("318"): # 0243875318 default realistic coastal sector
         approx_pos = (5.8620, 1.0340)
 
+    canoe_name = sub.canoe_name if sub else "Agbe Yeye"
+    landing_beach = sub.landing_beach if sub else "Keta Beach"
+
     fix = sdr_payload.execute_scan(
         phone_number=clean_phone,
         station_id=req.search_station_id,
         band=req.band,
         known_approx_pos=approx_pos,
+        canoe_name=canoe_name,
     )
-    
-    canoe_name = sub.canoe_name if sub else "Agbe Yeye"
-    landing_beach = sub.landing_beach if sub else "Keta Beach"
+
+    _, nearest_beach_dist_m = find_nearest_beach(Point(fix.lat, fix.lon))
+    if sub and getattr(sub, "language", None):
+        inferred_lang = sub.language.value if hasattr(sub.language, "value") else str(sub.language)
+    elif any(b in landing_beach for b in ("Keta", "Vodza", "Kedzi", "Dzelukope", "Anloga", "Aflao")):
+        inferred_lang = "Ewe"
+    elif any(b in landing_beach for b in ("Ada", "Prampram", "Ningo", "Anyanui")):
+        inferred_lang = "Dangme"
+    elif any(b in landing_beach for b in ("Tema", "Teshie", "Jamestown", "Chorkor", "Kokrobite")):
+        inferred_lang = "Ga"
+    elif any(b in landing_beach for b in ("Half Assini", "Axim")):
+        inferred_lang = "Nzema"
+    else:
+        inferred_lang = "Fante"
     
     # 1. Update Durable Store with verified external RF fix
     now = time.time()
@@ -1266,7 +1284,7 @@ def scan_sdr_pocket_phone(req: SDRScanRequest) -> Dict[str, Any]:
         owner_name=sub.owner_name if sub else canoe_name,
         canoe_name=canoe_name,
         landing_beach=landing_beach,
-        language="Ewe" if "Keta" in landing_beach or "Vodza" in landing_beach else "Fante",
+        language=inferred_lang,
         status="SDR_RF_ACQUIRED",
         registered_at=sub.registered_at if sub else now,
         last_seen_at=now,
@@ -1274,7 +1292,7 @@ def scan_sdr_pocket_phone(req: SDRScanRequest) -> Dict[str, Any]:
         last_timing_advance=int(fix.estimated_distance_m / 554.0),
         last_lat=fix.lat,
         last_lon=fix.lon,
-        distance_offshore_km=round(abs(fix.lat - 5.92) * 111.0, 2),
+        distance_offshore_km=round(nearest_beach_dist_m / 1000.0, 2),
     )
     durable_store.save_subscriber(rec)
 
@@ -1293,14 +1311,15 @@ def scan_sdr_pocket_phone(req: SDRScanRequest) -> Dict[str, Any]:
     closest_vessel = None
     try:
         nearby_entities = _engine.query_radius(Point(fix.lat, fix.lon), radius_m=60000.0)
-        for ent_id, pt, d_m in nearby_entities:
-            if ent_id.startswith("mmsi-"):
+        for ent_id, pt, d_m in sorted(nearby_entities, key=lambda item: item[2]):
+            if ent_id.upper().startswith("MMSI-"):
                 d_nm = d_m / 1852.0
                 bearing_to_vessel = initial_bearing(Point(fix.lat, fix.lon), pt)
                 state = _engine.get_kinematic_state(ent_id)
-                speed_kt = round(state.speed_mps * 1.94384, 1) if state else 0.0
+                vel_mps = getattr(state, "velocity_mps", getattr(state, "speed_mps", 0.0)) if state else 0.0
+                speed_kt = round(vel_mps * 1.94384, 1)
                 closest_vessel = {
-                    "mmsi": ent_id.replace("mmsi-", ""),
+                    "mmsi": ent_id[5:],
                     "distance_nm": round(d_nm, 2),
                     "bearing_deg": round(bearing_to_vessel, 1),
                     "lat": pt.lat,
@@ -1362,12 +1381,26 @@ def ingest_live_handset_gps(req: LiveGPSReportRequest) -> Dict[str, Any]:
     # 1. Update Durable Store
     sub = durable_store.get_subscriber(clean_phone)
     status_str = "SOS_DISTRESS" if req.is_sos else ("AT_SEA" if req.speed_knots > 0.5 else "SAFE_ON_SHORE")
+    _, nearest_beach_dist_m = find_nearest_beach(Point(req.lat, req.lon))
+    if sub and getattr(sub, "language", None):
+        inferred_lang = sub.language.value if hasattr(sub.language, "value") else str(sub.language)
+    elif any(b in req.landing_beach for b in ("Keta", "Vodza", "Kedzi", "Dzelukope", "Anloga", "Aflao")):
+        inferred_lang = "Ewe"
+    elif any(b in req.landing_beach for b in ("Ada", "Prampram", "Ningo", "Anyanui")):
+        inferred_lang = "Dangme"
+    elif any(b in req.landing_beach for b in ("Tema", "Teshie", "Jamestown", "Chorkor", "Kokrobite")):
+        inferred_lang = "Ga"
+    elif any(b in req.landing_beach for b in ("Half Assini", "Axim")):
+        inferred_lang = "Nzema"
+    else:
+        inferred_lang = "Fante"
+
     rec = SubscriberRecord(
         phone_number=clean_phone,
         owner_name=sub.owner_name if sub else req.canoe_name,
         canoe_name=req.canoe_name,
         landing_beach=req.landing_beach,
-        language="Ewe" if "Keta" in req.landing_beach or "Vodza" in req.landing_beach else "Fante",
+        language=inferred_lang,
         status=status_str,
         registered_at=sub.registered_at if sub else now,
         last_seen_at=now,
@@ -1375,7 +1408,7 @@ def ingest_live_handset_gps(req: LiveGPSReportRequest) -> Dict[str, Any]:
         last_timing_advance=0,
         last_lat=req.lat,
         last_lon=req.lon,
-        distance_offshore_km=round(abs(req.lat - 5.92) * 111.0, 2),
+        distance_offshore_km=round(nearest_beach_dist_m / 1000.0, 2),
     )
     durable_store.save_subscriber(rec)
 
@@ -3544,21 +3577,27 @@ def get_map_dashboard() -> str:
         const isRelocated = data.safety_assessment === 'SAFE_RELOCATED_LANDING';
         const isSafeHome = data.safety_assessment === 'SAFE_ON_SHORE_HOME';
         const badgeColor = (isRelocated || isSafeHome) ? '#059669' : '#0284c7';
+        const servingMast = data.tower_name || data.nearest_cell_tower || data.last_seen_tower || 'Coastal BTS';
+        const pingLatency = data.ping_latency_ms || data.latency_ms || 138;
+        const targetLat = (data.current_coordinates && data.current_coordinates.lat !== undefined) ? data.current_coordinates.lat : data.lat;
+        const targetLon = (data.current_coordinates && data.current_coordinates.lon !== undefined) ? data.current_coordinates.lon : data.lon;
 
         box.innerHTML = `
           <div style="font-weight:700;color:${badgeColor};margin-bottom:4px;">
             ${isRelocated ? 'SAFE ON SHORE &bull; RELOCATED' : (isSafeHome ? 'SAFE AT HOME BEACH' : 'ACTIVE AT SEA')}
           </div>
           <div>Canoe: <strong>${data.canoe_name}</strong> (${data.phone_number})</div>
-          <div>Serving Mast: <strong>${data.nearest_cell_tower}</strong> &bull; Latency: ${data.latency_ms}ms</div>
+          <div>Serving Mast: <strong>${servingMast}</strong> &bull; Latency: ${pingLatency}ms</div>
           <div>Nearest Beach: <strong>${data.nearest_beach}</strong> (${data.distance_from_home_km} km from ${data.home_beach})</div>
           <div style="margin-top:6px;">
-            <button class="btn btn-sm btn-emerald" style="width:100%;" onclick="map.flyTo([${data.lat}, ${data.lon}], 13)">FOCUS ON RADAR</button>
+            <button class="btn btn-sm btn-emerald" style="width:100%;" onclick="map.flyTo([${targetLat}, ${targetLon}], 13)">FOCUS ON RADAR</button>
           </div>
         `;
 
-        map.flyTo([data.lat, data.lon], 12);
-        logEvent(`[GSM FIX] ${data.canoe_name} located at ${data.nearest_beach} via ${data.nearest_cell_tower}.`, 'RADAR');
+        if (targetLat !== undefined && targetLon !== undefined) {
+          map.flyTo([targetLat, targetLon], 12);
+        }
+        logEvent(`[GSM FIX] ${data.canoe_name} located at ${data.nearest_beach} via ${servingMast}.`, 'RADAR');
       } catch (e) {
         console.error('Locate failed:', e);
       }

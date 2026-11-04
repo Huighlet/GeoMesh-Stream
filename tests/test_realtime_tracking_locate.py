@@ -154,6 +154,9 @@ def test_rest_api_locate_and_ping(client):
     data = loc_resp.json()
     assert data["canoe_name"] == "Sea Hunter"
     assert data["home_beach"] == "Keta Beach"
+    assert data["nearest_cell_tower"] == data["tower_name"]
+    assert data["latency_ms"] == data["ping_latency_ms"]
+    assert isinstance(data["lat"], float) and isinstance(data["lon"], float)
 
     # Ping to Vodza via POST
     ping_resp = client.post(
@@ -176,3 +179,27 @@ def test_rest_api_locate_and_ping(client):
 
     # Cleanup
     client.delete("/v1/telecom/subscribers/+233249998877")
+
+
+def test_live_gps_non_keta_beach_offshore_distance(client):
+    """Verify offshore distance uses nearest Ghana beach rather than hardcoded Keta 5.92 lat."""
+    resp = client.post(
+        "/v1/telecom/live-gps",
+        json={
+            "phone_number": "0248881122",
+            "canoe_name": "Nyame Ye",
+            "landing_beach": "Takoradi",
+            "lat": 4.8900,
+            "lon": -1.7400,
+            "accuracy_m": 4.0,
+            "speed_knots": 0.0,
+            "heading_deg": 180.0,
+            "is_sos": False,
+        },
+    )
+    assert resp.status_code == 200
+    from geomesh.server import durable_store
+    rec = durable_store.get_subscriber("+233248881122")
+    assert rec is not None
+    assert rec.distance_offshore_km == 0.0
+    assert rec.language == "Fante"
